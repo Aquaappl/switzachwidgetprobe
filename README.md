@@ -44,7 +44,7 @@ Download the latest `.deb`:
 [Releases](https://github.com/Aquaappl/switzachwidgetprobe/releases)). Or build it (below).
 Install it with your package manager (for example Sileo), then respring.
 
-A release is published automatically whenever the package version goes up
+Releases are made by hand: Actions › **Release** › Run workflow, on the `v1.x` or `v2.x` branch
 (`.github/workflows/release.yml`).
 
 ## Settings
