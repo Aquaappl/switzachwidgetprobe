@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>title</key>
+	<string>SwitzachWidgetProbe</string>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Safety</string>
+			<key>footerText</key>
+			<string>When a widget's button, configuration or data loading crashes, SwitzachWidgetProbe stops running that part so the home screen keeps working. Reset to try those parts again.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>Reset Widget Safety Guards</string>
+			<key>action</key>
+			<string>resetSafetyGuards:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Diagnostics</string>
+			<key>footerText</key>
+			<string>Writes a detailed log to Library/Caches/SwitzachWidgetProbe/runtime.txt in the home screen's folder. Crashes are always recorded there. Leave this off for normal use.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Diagnostic Log</string>
+			<key>key</key>
+			<string>DiagnosticLog</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.rinapple.switzachwidgetprobe</string>
+			<key>PostNotification</key>
+			<string>com.rinapple.switzachwidgetprobe/settings</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>SwitzachWidgetProbe 1.0.0
+Add widgets from the home screen's + button.</string>
+		</dict>
+	</array>
+</dict>
+</plist>
