@@ -38,8 +38,12 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
 
 ## Install
 
-Build the `.deb` (below) and install it with your package manager (for example Sileo), then
+Download the `.deb` from [Releases](https://github.com/Aquaappl/switzachwidgetprobe/releases)
+(or build it, below) and install it with your package manager (for example Sileo), then
 respring.
+
+A release is published automatically whenever the package version goes up
+(`.github/workflows/release.yml`).
 
 ## Settings
 

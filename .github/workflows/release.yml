@@ -1,0 +1,72 @@
+# Publishes a release when the package version goes up.
+#
+# The version is the "Version:" line of layout/DEBIAN/control. On a push to main that changes
+# that file (or this workflow), the package is built and released as v<version> with the .deb
+# attached, unless that release already exists. Other commits do not make a release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - layout/DEBIAN/control
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # to find the commit that set the version
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^Version: //p' layout/DEBIAN/control)
+          [ -n "$version" ] || { echo "No Version: line in layout/DEBIAN/control" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released; nothing to do."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install clang and lld
+        if: steps.version.outputs.new == 'true'
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang lld
+
+      - name: Get the iOS SDK (theos/sdks, iPhoneOS16.5.sdk only)
+        if: steps.version.outputs.new == 'true'
+        run: |
+          git clone -q --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
+          git -C "$RUNNER_TEMP/sdks" sparse-checkout set iPhoneOS16.5.sdk
+
+      - name: Build
+        if: steps.version.outputs.new == 'true'
+        run: SDK="$RUNNER_TEMP/sdks/iPhoneOS16.5.sdk" ./build.sh
+
+      - name: Release
+        if: steps.version.outputs.new == 'true'
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          # Notes: the message of the commit that set this version, without its title and
+          # trailer lines.
+          commit=$(git log -1 --format=%H -G '^Version:' -- layout/DEBIAN/control)
+          git log -1 --format=%b "$commit" | grep -v -E '^(Co-Authored-By|Signed-off-by):' > "$RUNNER_TEMP/notes.md" || true
+          [ -s "$RUNNER_TEMP/notes.md" ] || echo "SwitzachWidgetProbe $version" > "$RUNNER_TEMP/notes.md"
+          gh release create "v$version" build/*.deb \
+            --target "$GITHUB_SHA" \
+            --title "SwitzachWidgetProbe $version" \
+            --notes-file "$RUNNER_TEMP/notes.md"
