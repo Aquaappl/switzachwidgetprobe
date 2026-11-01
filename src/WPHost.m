@@ -2,12 +2,13 @@
 //
 // SpringBoard starts one host per widget extension (WPRemote.m) and talks to it over a pipe:
 // one JSON object per line on stdin (requests) and stdout (answers and events). The host
-// loads the extension with WPProbe (the same loader as before), draws each widget SpringBoard
-// asks for in a UIWindow of its own (SwiftUI only draws in a window), copies what it drew as an
-// image into a Core Animation remote context, and tells SpringBoard the context's id;
-// SpringBoard shows that context with a CALayerHost. Taps come from SpringBoard (a hosted
-// context does not receive touches) and run the widget's buttons and links here. The app's
-// code never runs inside SpringBoard: when it crashes, only this process ends.
+// loads the extension with WPProbe (the same loader as before) and draws each widget
+// SpringBoard asks for in a UIWindow of its own (SwiftUI only draws in a window). The layer of
+// the window's root view is moved into a Core Animation remote context — the views stay in the
+// window, so SwiftUI keeps updating them — and SpringBoard shows that context with a
+// CALayerHost. Taps come from SpringBoard (a hosted context does not receive touches) and run
+// the widget's buttons and links here. The app's code never runs inside SpringBoard: when it
+// crashes, only this process ends.
 //
 // Requests (stdin)                                     Answers / events (stdout)
 //   {"op":"list"}                                        {"op":"widgets","list":[…]}
@@ -78,8 +79,9 @@ static void WPHostLog(NSString *fmt, ...) {
 @property (nonatomic) CGSize size;
 @property (nonatomic) UIUserInterfaceStyle style;
 @property (nonatomic, strong) id context;      // CAContext (remote)
-@property (nonatomic, strong) CALayer *root;   // its layer: the snapshot
+@property (nonatomic, strong) CALayer *root;   // its layer: holds the container's layer
 @property (nonatomic, strong) UIWindow *window; // where SwiftUI draws
+@property (nonatomic, strong) UIViewController *container; // the window's root: holds the widget
 @property (nonatomic, strong) UIViewController *shown;
 @property (nonatomic) NSUInteger generation;
 @property (nonatomic) BOOL rendering;
@@ -95,53 +97,61 @@ static NSMutableDictionary<NSNumber *, WPHostedView *> *gViews;
 
 static void WPRender(WPHostedView *v, BOOL placeholder);
 
-// What SwiftUI drew in the window, as an image in the remote context.
-static void WPSnapshot(WPHostedView *v) {
-    if (!v.window || !v.shown) return;
-    [v.shown.view layoutIfNeeded];
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.scale = UIScreen.mainScreen.scale;
-    format.opaque = NO;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:v.size format:format];
-    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        [v.window.layer renderInContext:ctx.CGContext];
-    }];
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    v.root.contents = (__bridge id)image.CGImage;
-    v.root.contentsScale = format.scale;
-    [CATransaction commit];
-    [CATransaction flush];
+static NSUInteger WPCountLayers(CALayer *layer) {
+    NSUInteger n = 0;
+    for (CALayer *l in layer.sublayers) n += 1 + WPCountLayers(l);
+    return n;
 }
 
-// Right away, and again as images and late layout settle.
-static void WPSnapshotSoon(WPHostedView *v, NSArray<NSNumber *> *delays) {
-    NSUInteger generation = v.generation;
-    __weak WPHostedView *weakView = v;
-    for (NSNumber *d in delays) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            WPHostedView *strong = weakView;
-            if (strong && strong.generation == generation) WPSnapshot(strong);
-        });
-    }
-}
-
+// The window's root view (the container) has its layer moved into the remote context, so what
+// SpringBoard shows is the widget itself, still drawn and updated by SwiftUI in the window
+// (timers, progress, pressed buttons). Only this one layer is moved: the widget's own views are
+// ordinary subviews of the container, so putting a new drawing in and taking the old one out is
+// plain UIKit. (A widget view whose layer is moved by itself is left with a dangling superview
+// when it is released, and SwiftUI crashed on that.) SwiftUI draws nothing in a view laid out
+// while its layers are not under the window's, so the container's layer goes back under the
+// window while a new drawing is put in, and out again in the same transaction (SpringBoard
+// never sees it gone).
 static void WPShowController(WPHostedView *v, UIViewController *vc) {
     if (!v.window) {
         v.window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, v.size.width, v.size.height)];
         v.window.backgroundColor = UIColor.clearColor;
+        v.container = [UIViewController new];
+        v.container.view.backgroundColor = UIColor.clearColor;
+        v.window.rootViewController = v.container;
+        v.window.hidden = NO;
     }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [v.window.layer addSublayer:v.container.view.layer];
     v.window.frame = CGRectMake(0, 0, v.size.width, v.size.height);
+    v.container.view.frame = v.window.bounds;
     v.window.overrideUserInterfaceStyle = v.style;
+    UIViewController *old = v.shown;
     vc.view.backgroundColor = UIColor.clearColor;
-    v.window.rootViewController = vc;
-    v.window.hidden = NO;
-    vc.view.frame = v.window.bounds;
+    [v.container addChildViewController:vc];
+    vc.view.frame = v.container.view.bounds;
+    [v.container.view addSubview:vc.view];
+    [vc didMoveToParentViewController:v.container];
     [vc.view layoutIfNeeded];
+    if (old) {
+        [old willMoveToParentViewController:nil];
+        [old.view removeFromSuperview];
+        [old removeFromParentViewController];
+    }
+    [v.root addSublayer:v.container.view.layer];
     v.shown = vc;
     v.generation++;
-    WPSnapshot(v);
-    WPSnapshotSoon(v, @[ @0.3, @1.0, @2.5 ]);
+    [CATransaction commit];
+    [CATransaction flush];
+    if (gWPHostLog) {
+        NSUInteger generation = v.generation;
+        __weak WPHostedView *weakView = v;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            WPHostedView *strong = weakView;
+            if (strong && strong.generation == generation) WPHostLog(@"%@: %lu layer(s) drawn", strong.kind, (unsigned long)WPCountLayers(strong.shown.view.layer));
+        });
+    }
 }
 
 static void WPScheduleRefresh(WPHostedView *v, NSDate *next) {
@@ -258,8 +268,6 @@ static void WPShow(NSDictionary *m) {
         WPRender(v, YES);
     } else if (restyled && v.shown) {
         v.window.overrideUserInterfaceStyle = style;
-        WPSnapshot(v);
-        WPSnapshotSoon(v, @[ @0.3 ]);
     } else if (v.drawnOnce) {
         WPSend(@{ @"op" : @"drawn", @"view" : viewID, @"final" : @YES });
     }
@@ -270,6 +278,13 @@ static void WPHide(NSDictionary *m) {
     WPHostedView *v = [viewID isKindOfClass:[NSNumber class]] ? gViews[viewID] : nil;
     if (!v) return;
     [v.refreshTimer invalidate];
+    // The container's layer goes back under the window before UIKit takes the window apart.
+    if (v.window) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [v.window.layer addSublayer:v.container.view.layer];
+        [CATransaction commit];
+    }
     v.window.hidden = YES;
     v.window.rootViewController = nil;
     [gViews removeObjectForKey:viewID];
@@ -412,7 +427,6 @@ static void WPTap(NSDictionary *m) {
     else activate();
     WPSend(@{ @"op" : @"tapped", @"view" : viewID, @"result" : ok ? (link ? @"link" : @"button") : @"none", @"label" : label });
     if (!ok) return;
-    WPSnapshotSoon(v, @[ @0.15, @0.5 ]);
     if (!link) {
         // The button's intent has run: the widget reloads its timeline, as on iOS.
         for (NSNumber *d in @[ @0.7, @2.5 ]) {

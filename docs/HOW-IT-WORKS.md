@@ -20,7 +20,7 @@ This document describes version 2.0.0.
 
 ```
 SpringBoard (SwitzachWidgetProbe.dylib)               One widget host per app (SwitzachWidgetHost)
-├─ Tweak.m      entry point, "+ > Add Widget"         ├─ WPHost.m   requests, windows, snapshots, taps
+├─ Tweak.m      entry point, "+ > Add Widget"         ├─ WPHost.m   requests, windows, contexts, taps
 ├─ WPHome.m     home screen: icons, stacks, gallery,  ├─ WPProbe.m  loads and renders the extension
 │               removal, taps; shows the widgets      │  └─ app's widget extension (.appex), dlopen
 │               with CALayerHost                      └─ WPAsync.s  calls Swift async functions
@@ -58,7 +58,6 @@ Where iOS relies on a system service that Switzach does not have, the feature ca
 | Control Center controls, Live Activities | Different mechanisms (ControlWidget, ActivityKit) | Not supported |
 | Editing a widget's configuration | No configuration UI yet | Configurable widgets use their default configuration |
 | Widgets that need the app's live process or a system service Switzach lacks | The widget host is a plain process, not an iOS extension process with its system connections | The widget may stay on its placeholder |
-| Animations inside a widget | The home screen shows images the host takes of the widget (as iOS shows snapshots) | What is shown changes when the widget is drawn again |
 | Push updates from a server; `WidgetCenter.reloadTimelines` from the app as such | Switzach has no chronod | Changes to the app's shared data are watched instead, which has nearly the same effect |
 | An updated app's extension, right away | The extension runs from a signed copy | The new build is copied again on the next respring |
 
@@ -86,11 +85,15 @@ answers on its stdout.
 | `hide` (view id), `log` (diagnostic log on/off) | — |
 
 **Showing** — SwiftUI draws only in a window, and a window of the host cannot be shown in
-SpringBoard as it is. So the host puts each widget in a `UIWindow` of its own, takes an image
-of what it drew (right away and 0.3, 1 and 2.5 s later, as images and late layout settle; again
-after a tap), and puts the image into a Core Animation remote context. SpringBoard shows that
-context with a `CALayerHost` in the widget's icon. The context is made with
-`kCAContextIgnoresHitTest`, so touches reach SpringBoard, which sends taps to the host.
+SpringBoard as it is. So the host puts each widget in a `UIWindow` of its own and moves the
+layer of the window's root view into a Core Animation remote context; SpringBoard shows that
+context with a `CALayerHost` in the widget's icon. What SpringBoard shows are the widget's own
+layers, which SwiftUI keeps updating in the host — not an image of them. The widget's views stay
+ordinary subviews of the window's root view; SwiftUI draws nothing in a view laid out while its
+layers are not under the window's, so a new drawing is put in while the root view's layer is
+back under the window, and moved out again in the same Core Animation transaction. The context
+is made with `kCAContextIgnoresHitTest`, so touches reach SpringBoard, which sends taps to the
+host.
 
 **Lifetime** — A host ends when SpringBoard closes its pipe, or after a minute without any
 widget to show; it is started again when needed.
@@ -146,7 +149,7 @@ The host calls the app's own code in the order WidgetKit does on iOS.
 4. **No answer** — After 10 s a snapshot is asked for as well; after 40 s the tweak gives up
    and keeps what is shown.
 5. **Show** — The entry goes through the app's widget view into a `UIHostingController` in the
-   view's window; its image goes to SpringBoard (see Processes).
+   view's window, whose layers SpringBoard shows (see Processes).
 
 What triggers a refresh:
 
@@ -277,6 +280,9 @@ reach SpringBoard, it also checks those files' dates every 5 s.
   `SwitzachWidgetHost` process instead of SpringBoard; SpringBoard shows what it drew. A crash
   in a widget no longer takes the home screen down, and SpringBoard no longer loads any app's
   code.
+- **Widgets are shown live.** SpringBoard shows the widget's own layers from the host, not an
+  image of them, so what SwiftUI changes by itself plays on the home screen: a timer counts
+  down second by second (measured with a timer widget).
 - The buttons' crash marker (`control2-…`) is gone: a button that crashes ends only its host.
 - Measured on a device: a host starts in 80–90 ms, loads YouTube's or Spotify's extension in
   37–86 ms, and draws a widget 2–500 ms after the request.
@@ -321,7 +327,7 @@ entry on screen typically under 250 ms (median 79 ms). Reading the widgets is th
 | `src/WPHome.m` | SpringBoard | Home screen: icons, stacks, gallery, removal, taps; shows the hosts' contexts |
 | `src/WPRemote.m`, `src/WPRemote.h` | SpringBoard | Starting the widget hosts and talking to them |
 | `src/WPProbe.m`, `src/WPProbe.h` | SpringBoard and hosts | Finding extensions (SpringBoard); loading and drawing them, App Groups, crash guards and records (hosts) |
-| `src/WPHost.m` | Each host | The widget host: requests, windows, snapshots into remote contexts, taps and links |
+| `src/WPHost.m` | Each host | The widget host: requests, windows, remote contexts, taps and links |
 | `src/WPAsync.s` | Hosts (linked into SpringBoard's dylib too, with WPProbe.m) | Calling Swift `async` functions |
 | `src/WPSettings.m` | SpringBoard | Reading the settings; resetting the crash guards |
 | `src/WPLinks.m` | Each app | `SwitzachWidgetLinks`: receives a link's URL and hands it to the app |

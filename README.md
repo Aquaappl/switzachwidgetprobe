@@ -44,7 +44,7 @@ Download the latest `.deb`:
 [Releases](https://github.com/Aquaappl/switzachwidgetprobe/releases)). Or build it (below).
 Install it with your package manager (for example Sileo), then respring.
 
-Releases are made by hand: Actions › **Release** › Run workflow, on the `v1.x` or `v2.x` branch
+A release is published automatically whenever the package version goes up
 (`.github/workflows/release.yml`).
 
 ## Settings
@@ -62,8 +62,6 @@ TweakSettings › **SwitzachWidgetProbe**:
   performed. Switzach has no system service to hand the action to the app.
 - Widgets that need the app's live process (or system services Switzach does not provide) may
   stay on their placeholder.
-- The home screen shows images of the widgets (as iOS shows snapshots), so animations inside a
-  widget do not play.
 - Configurable widgets use their default configuration.
 
 ## Build
