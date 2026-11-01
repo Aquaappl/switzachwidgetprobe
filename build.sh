@@ -26,7 +26,15 @@ mkdir -p "$PREFS"
 $CC -dynamiclib -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
     -install_name /Library/MobileSubstrate/DynamicLibraries/SwitzachWidgetProbe.dylib \
     -o "$DYLIBS/SwitzachWidgetProbe.dylib" \
-    src/Tweak.m src/WPHome.m src/WPProbe.m src/WPSettings.m src/WPAsync.s
+    src/Tweak.m src/WPHome.m src/WPRemote.m src/WPProbe.m src/WPSettings.m src/WPAsync.s
+
+# The widget host: runs one app's widget extension in its own process (WPHost.m).
+HOST="$STAGE/Library/SwitzachWidgetProbe/SwitzachWidgetHost.app"
+mkdir -p "$HOST"
+$CC -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
+    -o "$HOST/SwitzachWidgetHost" \
+    src/WPHost.m src/WPProbe.m src/WPAsync.s
+sed "s/@VERSION@/$VERSION/g" host/Info.plist > "$HOST/Info.plist"
 
 # Loaded into apps: hands a widget link's URL to the app it opens.
 $CC -dynamiclib -framework Foundation -framework UIKit \

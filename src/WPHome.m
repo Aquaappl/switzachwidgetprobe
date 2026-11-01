@@ -15,6 +15,7 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import "WPProbe.h"
+#import "WPRemote.h"
 
 typedef struct {
     CGSize size;
@@ -218,85 +219,12 @@ static void WPLaunchApp(NSString *bundleID) {
     WPHLog(@"Cannot open app: %@ (leaf=%@)", bundleID, leaf);
 }
 
-#pragma mark - Controls inside widgets
+#pragma mark - Taps and links
 
-// SwiftUI buttons and links inside the widget are found through the accessibility tree
-// (every Button / Link is an element with the button or link trait) and activated
-// directly, so the widget behaves like on iOS: a tap on a control runs it, a tap
-// anywhere else opens the app.
-static CFAbsoluteTime gWPLastControlAt;   // a control was activated (suppresses the app launch)
-static NSString *gWPControlApp;            // app of the widget whose control was activated
-
-static void WPCollectAXElements(id node, NSMutableArray *out, int depth) {
-    if (!node || depth > 10 || out.count > 300) return;
-    if ([node isAccessibilityElement]) [out addObject:node];
-    NSArray *children = nil;
-    @try { children = [node accessibilityElements]; } @catch (NSException *e) {}
-    if (children.count) {
-        for (id c in children) WPCollectAXElements(c, out, depth + 1);
-    } else if ([node respondsToSelector:@selector(accessibilityElementCount)]) {
-        NSInteger n = [node accessibilityElementCount];
-        for (NSInteger i = 0; i < n && i < 100 && n != NSNotFound; i++) WPCollectAXElements([node accessibilityElementAtIndex:i], out, depth + 1);
-    }
-    if ([node isKindOfClass:[UIView class]] && !children.count) {
-        for (UIView *sub in ((UIView *)node).subviews) WPCollectAXElements(sub, out, depth + 1);
-    }
-}
-
-static NSString *WPTraitsText(UIAccessibilityTraits t) {
-    NSMutableArray *a = [NSMutableArray array];
-    if (t & UIAccessibilityTraitButton) [a addObject:@"button"];
-    if (t & UIAccessibilityTraitLink) [a addObject:@"link"];
-    if (t & UIAccessibilityTraitImage) [a addObject:@"image"];
-    if (t & UIAccessibilityTraitStaticText) [a addObject:@"text"];
-    if (t & UIAccessibilityTraitSelected) [a addObject:@"selected"];
-    return a.count ? [a componentsJoinedByString:@"/"] : @"-";
-}
-
-// The smallest button or link under the point (in the view's coordinates), or nil.
-static id WPControlAtPoint(UIView *view, CGPoint p, BOOL logTree) {
-    NSMutableArray *elements = [NSMutableArray array];
-    WPCollectAXElements(view, elements, 0);
-    CGPoint sp = [view convertPoint:p toCoordinateSpace:UIScreen.mainScreen.coordinateSpace];
-    id best = nil;
-    CGFloat bestArea = CGFLOAT_MAX;
-    for (id e in elements) {
-        CGRect f = [e accessibilityFrame];
-        UIAccessibilityTraits t = [e accessibilityTraits];
-        if (logTree) WPHLog(@"    element: %@ \"%@\" %@", WPTraitsText(t), [e accessibilityLabel] ?: @"", NSStringFromCGRect(f));
-        if (!(t & (UIAccessibilityTraitButton | UIAccessibilityTraitLink))) continue;
-        if (!CGRectContainsPoint(f, sp)) continue;
-        CGFloat area = f.size.width * f.size.height;
-        if (area < bestArea) { best = e; bestArea = area; }
-    }
-    // Like iOS, a small button takes taps around it too (a 44 pt target): the nearest one whose
-    // enlarged frame holds the point.
-    if (!best) {
-        CGFloat bestDistance = CGFLOAT_MAX;
-        for (id e in elements) {
-            if (!([e accessibilityTraits] & (UIAccessibilityTraitButton | UIAccessibilityTraitLink))) continue;
-            CGRect f = [e accessibilityFrame];
-            CGRect target = CGRectInset(f, MIN(0, (f.size.width - 44) / 2), MIN(0, (f.size.height - 44) / 2));
-            if (!CGRectContainsPoint(target, sp)) continue;
-            CGFloat d = hypot(sp.x - CGRectGetMidX(f), sp.y - CGRectGetMidY(f));
-            if (d < bestDistance) { best = e; bestDistance = d; }
-        }
-    }
-    if (logTree) WPHLog(@"  %lu accessibility element(s) (tap at %@)", (unsigned long)elements.count, NSStringFromCGPoint(sp));
-    return best;
-}
-
-// SwiftUI builds the accessibility tree (where the widget's buttons and links are found) only
-// when accessibility is in use: it is turned on for this process when the first widget shows.
-static void WPEnableAccessibility(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        void *lib = dlopen("/usr/lib/libAccessibility.dylib", RTLD_NOW);
-        void (*setEnabled)(BOOL) = lib ? dlsym(lib, "_AXSApplicationAccessibilitySetEnabled") : NULL;
-        if (setEnabled) setEnabled(YES);
-        WPHLog(@"Turned accessibility on (%@)", setEnabled ? @"done" : @"function missing");
-    });
-}
+// A widget's buttons and links run in its host process (see WPHost.m); a link's URL comes
+// back here and is handed to the app (hook_appOpenURL).
+static CFAbsoluteTime gWPLastControlAt;   // a widget link was opened
+static NSString *gWPControlApp;            // app of the widget whose link it was
 
 // Opens the app shortly after a tap unless a control inside the widget took the tap.
 static void WPRequestLaunch(NSString *bundleID) {
@@ -369,7 +297,9 @@ static void hook_appOpenURL(id self, SEL _cmd, NSURL *url, NSDictionary *options
 @property (nonatomic, copy) NSString *kind;
 @property (nonatomic, copy) NSString *gridSizeClass;
 @property (nonatomic) BOOL preview; // in the add sheet: drawn only, taps do nothing
-- (BOOL)activateControlAtPoint:(CGPoint)pointInSelf;
+// A tap at this point (in the view's points): the widget's host runs the button or link there,
+// or the app opens.
+- (void)tapAtPoint:(CGPoint)pointInSelf;
 - (void)setIconImageInfo:(SBIconImageInfo)info;
 @end
 
@@ -419,114 +349,50 @@ static void WPForwardAsZero(NSInvocation *invocation) {
 }
 
 
-// Whether the view shows on its window right now (not hidden, not on another page).
-static BOOL WPViewOnScreen(UIView *view) {
-    UIWindow *window = view.window;
-    if (!window || window.hidden || window.alpha < 0.01) return NO;
-    for (UIView *v = view; v; v = v.superview) {
-        if (v.hidden || v.alpha < 0.01) return NO;
-    }
-    CGRect r = CGRectIntersection([view convertRect:view.bounds toView:nil], window.bounds);
-    return !CGRectIsNull(r) && r.size.width > 1 && r.size.height > 1;
-}
-
+// What the widget shows is drawn by its extension's host process (WPRemote / WPHost.m) into a
+// context of its own; this view shows that context with a CALayerHost, and sends taps there.
 @implementation WPHomeWidgetViewController {
     SBIconImageInfo _info;
-    UIViewController *_hosted;
     UILabel *_status;
     BOOL _renderScheduled;
     CGSize _renderedSize;
-    int _attempts;
-    NSUInteger _generation;
-    NSTimer *_refreshTimer;
     int _renderedFamily;
-    BOOL _rendering;            // a render waits for the app's timeline
-    BOOL _refreshAgain;         // another reload was asked for meanwhile
-    CFAbsoluteTime _hiddenSince; // a reload waits for the widget to be on screen
-    BOOL _hiddenCheck;
+    BOOL _renderedDark;
+    NSInteger _viewID;      // this view at the host
+    CALayer *_hostLayer;    // CALayerHost showing the host's context
+    BOOL _drawn;
+    CFAbsoluteTime _lastTap;
 }
 
 - (void)dealloc {
-    [_refreshTimer invalidate];
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    if (_viewID) [WPRemote hideView:_viewID extension:self.extension];
 }
 
 - (void)handleTap:(UITapGestureRecognizer *)tap {
+    [self tapAtPoint:[tap locationInView:self.view]];
+}
+
+- (void)tapAtPoint:(CGPoint)pointInSelf {
     if (self.preview || WPIsEditing()) return;
-    if (![self activateControlAtPoint:[tap locationInView:self.view]]) WPRequestLaunch(self.extension.appBundleID);
-}
-
-// Runs the button / link under the point. Returns YES if there was one.
-- (BOOL)activateControlAtPoint:(CGPoint)pointInSelf {
-    if (!_hosted) return NO;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - gWPLastControlAt < 0.5) return YES; // the same tap seen through another path
-    static NSMutableSet *logged;
-    if (!logged) logged = [NSMutableSet set];
-    BOOL logTree = ![logged containsObject:self.kind];
-    if (logTree) [logged addObject:self.kind];
-    if (logTree) WPHLog(@"%@ buttons and links:", self.kind);
-    CGPoint p = [self.view convertPoint:pointInSelf toView:_hosted.view];
-    id control = WPControlAtPoint(_hosted.view, p, logTree);
-    if (!control) {
-        if (logTree) [logged removeObject:self.kind]; // list the elements again once accessibility is on
-        return NO;
+    if (now - _lastTap < 0.4) return; // the same tap seen through another path
+    _lastTap = now;
+    NSString *app = self.extension.appBundleID;
+    if (!_viewID || !_drawn) {
+        WPLaunchApp(app);
+        return;
     }
-    // A control whose action crashed SpringBoard before (the marker survived) is not run
-    // again; the tap opens the app instead.
-    // A link only opens its URL (see hook_appOpenURL), so only buttons, which run the app's
-    // code, are guarded.
-    UIAccessibilityTraits traits = [control accessibilityTraits];
-    BOOL linkOnly = (traits & UIAccessibilityTraitLink) && !(traits & UIAccessibilityTraitButton);
-    NSString *marker = [NSString stringWithFormat:@"control2-%@-%@", self.extension.extensionBundleID, self.kind];
-    // iOS performs some intents in the app's own process rather than the widget's (see
-    // WPProbe appProcessIntentsForExtension:). Here the tap opens the app for those.
-    NSString *inApp = linkOnly ? nil : [WPProbe appProcessIntentsForExtension:self.extension];
-    if (inApp) {
-        WPHLog(@"%@: the button's action (%@) runs inside the app on iOS, so the app is opened", self.kind, inApp);
-        return NO;
-    }
-    if (!linkOnly) {
-        if (WPMarkerTripped(marker)) {
-            WPHLog(@"%@: the button crashed last time, so it is not run; the app is opened", self.kind);
-            return NO;
+    NSString *kind = self.kind;
+    [WPRemote tapView:_viewID extension:self.extension point:pointInSelf result:^(NSString *result, NSDictionary *m) {
+        NSString *label = [m[@"label"] isKindOfClass:[NSString class]] ? [NSString stringWithFormat:@" \"%@\"", m[@"label"]] : @"";
+        if ([result isEqualToString:@"app"]) {
+            WPHLog(@"Tap on %@%@: an action iOS runs inside the app (%@), so the app is opened", kind, label, m[@"intents"]);
+        } else {
+            WPHLog(@"Tap on %@%@: %@", kind, label, result);
         }
-        WPMarkerBegin(marker);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            WPMarkerEnd(marker);
-        });
-    }
-    gWPLastControlAt = now;
-    gWPControlApp = self.extension.appBundleID;
-    BOOL ok = NO;
-    @try { ok = [control accessibilityActivate]; } @catch (NSException *e) { WPHLog(@"  Exception while running: %@", e.reason); }
-    WPHLog(@"Ran widget %@ \"%@\" → %@", WPTraitsText([control accessibilityTraits]), [control accessibilityLabel] ?: @"", ok ? @"ok" : @"failed");
-    if (!ok) {
-        gWPLastControlAt = 0;
-        return NO;
-    }
-    // Interactive widgets reload their timeline after the button's intent has run.
-    __weak typeof(self) weakSelf = self;
-    for (NSNumber *delay in @[ @0.7, @2.5 ]) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [weakSelf refresh];
-        });
-    }
-    return YES;
-}
-
-// Redraws at the next timeline entry's date, or every 30 minutes (like a reload policy of .atEnd).
-- (void)scheduleRefreshAt:(NSDate *)date {
-    [_refreshTimer invalidate];
-    NSTimeInterval delay = date ? MAX(60, date.timeIntervalSinceNow) : 30 * 60;
-    __weak typeof(self) weakSelf = self;
-    _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:delay repeats:NO block:^(NSTimer *t) {
-        WPHomeWidgetViewController *strong = weakSelf;
-        if (!strong) return;
-        WPHLog(@"Refresh: %@", strong.kind);
-        [strong refresh];
+        if ([result isEqualToString:@"button"] || [result isEqualToString:@"link"]) return;
+        WPLaunchApp(app);
     }];
-    _refreshTimer.tolerance = 10;
 }
 
 + (void)initialize {
@@ -557,7 +423,7 @@ static BOOL WPViewOnScreen(UIView *view) {
     v.layer.cornerRadius = _info.continuousCornerRadius > 0 ? _info.continuousCornerRadius : 22;
     v.layer.cornerCurve = kCACornerCurveContinuous;
     v.clipsToBounds = YES;
-    // Taps open the app; long press and drags still reach the icon view's own recognizers.
+    // Taps go to the widget; long press and drags still reach the icon view's own recognizers.
     v.userInteractionEnabled = YES;
     [v addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)]];
     _status = [UILabel new];
@@ -573,58 +439,22 @@ static BOOL WPViewOnScreen(UIView *view) {
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     _status.frame = CGRectInset(self.view.bounds, 8, 8);
-    _hosted.view.frame = self.view.bounds;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _hostLayer.frame = self.view.bounds;
+    [CATransaction commit];
     CGSize s = self.view.bounds.size;
     if (s.width > 10 && (fabs(s.width - _renderedSize.width) > 4 || fabs(s.height - _renderedSize.height) > 4)) [self scheduleRender];
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(dataChanged:) name:@"WPWidgetDataChanged" object:nil];
     [self scheduleRender];
 }
 
-// The app wrote to its shared data: reload the timeline (WidgetCenter.reloadTimelines).
-- (void)dataChanged:(NSNotification *)note {
-    if (![note.object isEqual:self.extension.extensionBundleID]) return;
-    WPHLog(@"App data changed, refreshing: %@", self.kind);
-    [self refresh];
-}
-
-// Reloads what is shown (the next timeline entry, after a button, when the app's data
-// changed). While a reload is still waiting for the app's timeline, more requests become one
-// reload after it. A widget that is not on screen (another page) waits until it is — at most
-// a minute, so it never stops updating.
-- (void)refresh {
-    if (!_hosted) {
-        _renderedSize = CGSizeZero;
-        _attempts = 0;
-        [self render];
-        return;
-    }
-    if (_rendering) {
-        _refreshAgain = YES;
-        return;
-    }
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (!WPViewOnScreen(self.view) && (!_hiddenSince || now - _hiddenSince < 60)) {
-        if (!_hiddenSince) _hiddenSince = now;
-        if (!_hiddenCheck) {
-            _hiddenCheck = YES;
-            __weak typeof(self) weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                WPHomeWidgetViewController *strong = weakSelf;
-                if (!strong) return;
-                strong->_hiddenCheck = NO;
-                [strong refresh];
-            });
-        }
-        return;
-    }
-    _hiddenSince = 0;
-    _renderedSize = CGSizeZero;
-    _attempts = 0;
-    [self render];
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if (previous.userInterfaceStyle != self.traitCollection.userInterfaceStyle) [self scheduleRender];
 }
 
 - (void)scheduleRender {
@@ -636,72 +466,59 @@ static BOOL WPViewOnScreen(UIView *view) {
     });
 }
 
+// Asks the host to draw the widget at this view's size (again only when the size, the family
+// or light/dark changed: the host refreshes the widget by itself).
 - (void)render {
     _renderScheduled = NO;
     CGSize size = self.isViewLoaded ? self.view.bounds.size : CGSizeZero;
     if (size.width < 10) size = _info.size;
     if (size.width < 10) return;
-    if (fabs(size.width - _renderedSize.width) <= 4 && fabs(size.height - _renderedSize.height) <= 4 && _hosted) return;
-    if (![WPProbe loadedWidgetsForExtension:self.extension]) {
-        // Its code loads in the background first (the home screen stays responsive meanwhile).
+    int family = WPFamilyForGridClass(self.gridSizeClass);
+    BOOL dark = self.traitCollection.userInterfaceStyle != UIUserInterfaceStyleLight;
+    if (_viewID && fabs(size.width - _renderedSize.width) <= 4 && fabs(size.height - _renderedSize.height) <= 4 && family == _renderedFamily &&
+        dark == _renderedDark) return;
+    if (![WPRemote loadedWidgetsForExtension:self.extension]) {
+        // The host loads the app's code first (in its own process).
         __weak typeof(self) weakSelf = self;
-        [WPProbe prepareExtension:self.extension completion:^{
+        [WPRemote prepareExtension:self.extension completion:^{
             WPHomeWidgetViewController *strong = weakSelf;
             if (strong) [strong render];
         }];
         return;
     }
-    if (++_attempts > 6) return;
+    if (!_viewID) _viewID = [WPRemote newViewID];
     _renderedSize = size;
-    NSUInteger generation = ++_generation;
-    int family = WPFamilyForGridClass(self.gridSizeClass);
+    _renderedFamily = family;
+    _renderedDark = dark;
     __weak typeof(self) weakSelf = self;
-    @try {
-        // The placeholder only for the first drawing (or a new size); a refresh goes straight
-        // from what is shown to the new entry.
-        BOOL placeholder = !_hosted || family != _renderedFamily;
-        _renderedFamily = family;
-        _rendering = YES;
-        [WPProbe renderWidgetKind:self.kind extension:self.extension family:family size:size placeholder:placeholder
-                           update:^(UIViewController *vc, NSDate *next, BOOL final) {
-            WPHomeWidgetViewController *strong = weakSelf;
-            if (!strong || generation != strong->_generation) return;
-            if (vc) [strong showHosted:vc];
-            else if (!strong->_hosted) strong->_status.text = @"Could not draw";
-            if (final) {
-                [strong scheduleRefreshAt:next];
-                [strong renderFinished];
-            }
-        }];
-    } @catch (NSException *e) {
-        WPHLog(@"Exception while drawing: %@", e.reason);
-        [self renderFinished];
-    }
+    [WPRemote showView:_viewID extension:self.extension kind:self.kind family:family size:size dark:dark events:^(NSDictionary *m) {
+        [weakSelf hostEvent:m];
+    }];
 }
 
-- (void)renderFinished {
-    _rendering = NO;
-    if (!_refreshAgain) return;
-    _refreshAgain = NO;
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf refresh]; });
-}
-
-- (void)showHosted:(UIViewController *)vc {
-    WPEnableAccessibility();
-    if (_hosted) {
-        [_hosted willMoveToParentViewController:nil];
-        [_hosted.view removeFromSuperview];
-        [_hosted removeFromParentViewController];
+- (void)hostEvent:(NSDictionary *)m {
+    NSString *op = m[@"op"];
+    if ([op isEqualToString:@"context"]) {
+        if (!_hostLayer) {
+            _hostLayer = [NSClassFromString(@"CALayerHost") layer];
+            if (!_hostLayer) return;
+            [self.view.layer insertSublayer:_hostLayer below:_status.layer];
+        }
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        ((void (*)(id, SEL, uint32_t))objc_msgSend)(_hostLayer, NSSelectorFromString(@"setContextId:"), [m[@"id"] unsignedIntValue]);
+        _hostLayer.frame = self.view.bounds;
+        [CATransaction commit];
+    } else if ([op isEqualToString:@"drawn"]) {
+        _drawn = YES;
+        _status.hidden = YES;
+    } else if ([op isEqualToString:@"failed"]) {
+        WPHLog(@"%@ could not be drawn: %@", self.kind, m[@"reason"]);
+        if (!_drawn) {
+            _status.hidden = NO;
+            _status.text = @"Could not draw";
+        }
     }
-    _hosted = vc;
-    [self addChildViewController:vc];
-    vc.view.backgroundColor = UIColor.clearColor;
-    vc.view.userInteractionEnabled = NO;
-    vc.view.frame = self.view.bounds;
-    [self.view addSubview:vc.view];
-    [vc didMoveToParentViewController:self];
-    _status.hidden = YES;
 }
 
 // SpringBoardHome may call optional methods of SBIconViewCustomImageViewControlling without
@@ -1162,7 +979,7 @@ static void WPNoteLoadedState(id state) {
         for (NSDictionary *r in widgets) {
             for (NSDictionary *w in r[@"widgets"]) {
                 WPWidgetExtension *ext = WPExtensionForID(w[@"ext"]);
-                if (ext) [WPProbe prepareExtension:ext completion:nil];
+                if (ext) [WPRemote prepareExtension:ext completion:nil];
             }
         }
     }
@@ -1197,7 +1014,10 @@ static void hook_iconTapped(id self, SEL _cmd, id iconView) {
             for (UIGestureRecognizer *g in ((UIView *)iconView).gestureRecognizers) {
                 if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
                 CGPoint p = [g locationInView:page.view];
-                if (CGRectContainsPoint(page.view.bounds, p) && [page activateControlAtPoint:p]) return;
+                if (CGRectContainsPoint(page.view.bounds, p)) {
+                    [page tapAtPoint:p];
+                    return;
+                }
                 break;
             }
         }
@@ -1461,6 +1281,13 @@ static void WPAddIfMissing(Class cls, NSString *selName, IMP imp, const char *ty
 void WPHomeInstall(void) {
     WPGuardBoot();
     [WPProbe installRuntimeCrashLog];
+    [WPRemote setLogger:^(NSString *line) { WPHLog(@"%@", line); }];
+    // A widget's link: the URL goes to its app (hook_appOpenURL hands it over and opens the app).
+    [WPRemote setOpenURLHandler:^(NSURL *url, WPWidgetExtension *extension) {
+        gWPLastControlAt = CFAbsoluteTimeGetCurrent();
+        gWPControlApp = extension.appBundleID;
+        [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+    }];
     WPHook(@"SBHIconManager", @"customImageViewControllerForIconView:", (IMP)hook_customImageVC, &orig_customImageVC);
     WPHook(@"SBHIconManager", @"isWidgetValid:iconSizeClass:", (IMP)hook_isWidgetValid, &orig_isWidgetValid);
     WPHook(@"SBHIconManager", @"validatedWidgetIconForWidgetIcon:", (IMP)hook_validatedIcon, &orig_validatedIcon);
@@ -1627,7 +1454,7 @@ static NSArray<NSDictionary *> *WPHomeScreenWidgets(NSArray<NSDictionary *> *wid
 
 // An app whose widgets are known (loaded) and are all for other places is not listed.
 static BOOL WPAppHasHomeWidgets(WPWidgetExtension *ext) {
-    NSArray *loaded = [WPProbe loadedWidgetsForExtension:ext];
+    NSArray *loaded = [WPRemote loadedWidgetsForExtension:ext];
     return !loaded || WPHomeScreenWidgets(loaded).count > 0;
 }
 
@@ -2015,7 +1842,7 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
     NSMutableArray *items = [NSMutableArray array];
     NSString *q = _search.text.length ? _search.text : nil;
     for (WPWidgetExtension *ext in _apps) {
-        NSArray *widgets = [WPProbe loadedWidgetsForExtension:ext];
+        NSArray *widgets = [WPRemote loadedWidgetsForExtension:ext];
         for (NSDictionary *w in widgets) {
             NSString *title = WPWidgetTitle(w, ext);
             if (q && [title rangeOfString:q options:NSCaseInsensitiveSearch].location == NSNotFound &&
@@ -2097,7 +1924,7 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
     } else {
         _shownApps = [_apps filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WPWidgetExtension *e, NSDictionary *b) {
             if ([e.appName rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
-            for (NSDictionary *w in [WPProbe loadedWidgetsForExtension:e]) {
+            for (NSDictionary *w in [WPRemote loadedWidgetsForExtension:e]) {
                 if ([WPWidgetTitle(w, e) rangeOfString:text options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
             }
             return NO;
@@ -2148,10 +1975,10 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
     cell.accessoryView = spinner;
     [spinner startAnimating];
     tableView.userInteractionEnabled = NO;
-    [WPProbe prepareExtension:e completion:^{
+    [WPRemote prepareExtension:e completion:^{
         tableView.userInteractionEnabled = YES;
         cell.accessoryView = nil;
-        [self openApp:e widgets:[WPProbe widgetsForExtension:e] startKind:nil];
+        [self openApp:e widgets:[WPRemote widgetsForExtension:e] startKind:nil];
         [self buildSuggestions];
     }];
 }
@@ -2160,7 +1987,7 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
     if (tile.tag < 0 || tile.tag >= (NSInteger)_suggestions.count) return;
     NSDictionary *it = _suggestions[tile.tag];
     WPWidgetExtension *ext = it[@"ext"];
-    [self openApp:ext widgets:[WPProbe widgetsForExtension:ext] startKind:it[@"widget"][@"kind"]];
+    [self openApp:ext widgets:[WPRemote widgetsForExtension:ext] startKind:it[@"widget"][@"kind"]];
 }
 
 - (void)openApp:(WPWidgetExtension *)ext widgets:(NSArray *)allWidgets startKind:(NSString *)kind {

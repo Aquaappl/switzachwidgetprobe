@@ -109,6 +109,11 @@ void WPMarkerEnd(NSString *name) {
 
 static NSString *gWPLogPath; // overrides report.txt (the home screen runtime logs elsewhere)
 static BOOL gWPQuiet;        // details (the widget's type tree) stay in memory
+static NSString *gWPLogTag;  // put before each line written (a widget host names itself)
+
+void WPSetLogTag(NSString *tag) {
+    gWPLogTag = [tag copy];
+}
 
 BOOL WPDiagnosticLogEnabled(void); // WPSettings.m
 
@@ -120,7 +125,8 @@ static void WPAppend(NSMutableString *log, NSString *line) {
     NSString *path = gWPLogPath ?: [WPProbe reportPath];
     int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) {
-        NSData *data = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *tagged = gWPLogTag ? [gWPLogTag stringByAppendingString:line] : line;
+        NSData *data = [[tagged stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
         write(fd, data.bytes, data.length);
         fsync(fd);
         close(fd);

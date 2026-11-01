@@ -1,6 +1,6 @@
 Package: com.rinapple.switzachwidgetprobe
 Name: SwitzachWidgetProbe
-Version: 1.0.2
+Version: 2.0.0
 Architecture: iphoneos-arm64e
 Description: Home screen widgets for sideloaded apps on Switzach
  Puts the widgets of sideloaded apps on the Switzach home screen, the way iOS
@@ -9,8 +9,8 @@ Description: Home screen widgets for sideloaded apps on Switzach
  interactive buttons, and links that open the app at the right place.
  Actions that iOS performs inside the app open the app.
  .
- Crash guards stop a widget part that crashed instead of letting SpringBoard
- crash again; reset them in TweakSettings > SwitzachWidgetProbe.
+ Each app's widgets run in a process of their own, not in SpringBoard: a widget
+ that crashes ends only that process, which is started again.
 Maintainer: rinapple
 Author: rinapple
 Homepage: https://github.com/Aquaappl/switzachwidgetprobe

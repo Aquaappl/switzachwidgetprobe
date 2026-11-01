@@ -3,8 +3,9 @@
 Home screen widgets for sideloaded apps on Switzach — the way iOS does them.
 
 Apps you install in the Switzach ROM ship their own WidgetKit extensions, but the ROM's home
-screen has nothing that runs them. SwitzachWidgetProbe loads each app's widget extension inside
-SpringBoard and draws the widgets with the app's own SwiftUI code.
+screen has nothing that runs them. SwitzachWidgetProbe runs each app's widget extension in a
+process of its own — as iOS does — and draws the widgets with the app's own SwiftUI code;
+the home screen shows what that process drew. No app code runs inside SpringBoard.
 
 How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
@@ -26,9 +27,8 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
   into apps, hands the URL over).
 - **Translated texts** — texts the system looks up while drawing (SwiftUI `Text("key")`,
   `String(localized:)`) are found in the widget's own strings.
-- **Crash guards** — if a widget's button, configuration or data loading crashes, that part is
-  stopped instead of taking SpringBoard down again. If SpringBoard keeps crashing right after
-  launch, widgets are not drawn for one launch so they can be removed.
+- **Crash isolation** — a widget that crashes ends only its own process, which is started again;
+  SpringBoard stays up. A part that keeps crashing is stopped (reset it in the settings).
 
 ## Requirements
 
@@ -62,6 +62,8 @@ TweakSettings › **SwitzachWidgetProbe**:
   performed. Switzach has no system service to hand the action to the app.
 - Widgets that need the app's live process (or system services Switzach does not provide) may
   stay on their placeholder.
+- The home screen shows images of the widgets (as iOS shows snapshots), so animations inside a
+  widget do not play.
 - Configurable widgets use their default configuration.
 
 ## Build
@@ -79,9 +81,12 @@ Needs clang and lld (LLVM), an iOS SDK with the private `Preferences` framework 
 | --- | --- |
 | `src/Tweak.m` | Entry point in SpringBoard; the **+** menu's Add Widget |
 | `src/WPHome.m` | Home screen integration: widget icons, stacks, gallery, removal, taps |
+| `src/WPRemote.m`, `src/WPRemote.h` | SpringBoard's side of the widget hosts: starting them, talking to them |
+| `src/WPHost.m` | `SwitzachWidgetHost`, one process per widget extension: draws and runs its widgets |
 | `src/WPProbe.m`, `src/WPProbe.h` | Finding, loading and rendering widget extensions (Swift runtime, WidgetKit) |
 | `src/WPAsync.s` | Calling Swift `async` functions |
 | `src/WPSettings.m` | Settings and the safety-guard reset |
 | `src/WPLinks.m` | `SwitzachWidgetLinks`, loaded into apps: receives widget links |
+| `host/` | The widget host app's Info.plist |
 | `prefs/` | The settings page (PreferenceLoader bundle) |
 | `layout/` | Package metadata and injection filters |

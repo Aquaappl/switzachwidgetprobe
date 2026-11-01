@@ -102,8 +102,9 @@ static void WLSchedule(NSNotification *note) {
 
 __attribute__((constructor)) static void WLInit(void) {
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
-    // SpringBoard (the ROM's home screen) is the sender, not a receiver.
-    if (!bundleID || [bundleID isEqualToString:@"com.apple.springboard"] || objc_getClass("NXHomeScreenViewController")) return;
+    // SpringBoard (the ROM's home screen) is the sender, not a receiver; nor is a widget host.
+    if (!bundleID || [bundleID isEqualToString:@"com.apple.springboard"] || objc_getClass("NXHomeScreenViewController") ||
+        [bundleID isEqualToString:@"com.rinapple.switzachwidgetprobe.host"]) return;
     // Tells SpringBoard that links can reach this app.
     NSString *seen = [NSHomeDirectory() stringByAppendingPathComponent:kWLSeen];
     [[NSFileManager defaultManager] createDirectoryAtPath:seen.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];

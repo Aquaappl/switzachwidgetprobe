@@ -56,4 +56,7 @@ FOUNDATION_EXPORT BOOL WPMarkerTripped(NSString *name); // crashed before (turns
 FOUNDATION_EXPORT void WPMarkerBegin(NSString *name);
 FOUNDATION_EXPORT void WPMarkerEnd(NSString *name);
 
+// Written before each log line (a widget host process names itself this way).
+FOUNDATION_EXPORT void WPSetLogTag(NSString *tag);
+
 NS_ASSUME_NONNULL_END

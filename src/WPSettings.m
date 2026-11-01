@@ -12,6 +12,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
 #import "WPProbe.h"
+#import "WPRemote.h"
 
 static NSString *const kWPDomain = @"com.rinapple.switzachwidgetprobe";
 static NSString *const kWPChanged = @"com.rinapple.switzachwidgetprobe/settings";
@@ -89,6 +90,7 @@ static void WPApplySettings(void) {
     if (log != gWPDiagnosticLog) {
         gWPDiagnosticLog = log;
         if (log) [WPProbe startStallWatchdog];
+        [WPRemote diagnosticLogChanged];
         NSLog(@"[WidgetProbe] diagnostic log %@", log ? @"on" : @"off");
     }
     double request = [values[@"ResetRequest"] doubleValue];
