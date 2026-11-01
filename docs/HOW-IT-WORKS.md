@@ -10,7 +10,7 @@ The tweak is loaded into SpringBoard (and, for links, into apps) by ElleKit, thr
 ElleKit's function hooks are not used: everything is hooked through the Objective-C runtime
 (`method_setImplementation`).
 
-This document describes version 1.0.2.
+This document describes version 1.0.3.
 
 ## At a glance
 
@@ -221,6 +221,13 @@ reach SpringBoard, it also checks those files' dates every 5 s.
 - `report.txt` — details of loading extensions (with the diagnostic log on).
 - `runtime-<extension id>/` — the extension's copy and caches.
 - `*.running` / `*.bad` — crash markers.
+
+## Changes in 1.0.3
+
+- After a respring, widgets on a page that held only widgets ended up on another page (with
+  the app icons pushed to the next page): SpringBoardHome drops that page together with the
+  widgets while importing the layout, so the pages after it moved up. The page is now made
+  again before the widgets are put back.
 
 ## Changes in 1.0.2
 
