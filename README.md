@@ -25,8 +25,9 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
   take taps within a 44 pt target, as on iOS.
 - **Links** — a widget's links open the app at the right place (`SwitzachWidgetLinks`, loaded
   into apps, hands the URL over).
-- **Translated texts** — texts the system looks up while drawing (SwiftUI `Text("key")`,
-  `String(localized:)`) are found in the widget's own strings.
+- **The widget's own resources** — texts and images the system looks up while drawing
+  (SwiftUI `Text("key")` and `Image("name")`, `String(localized:)`, `UIImage(named:)`) are found
+  in the widget's own bundle.
 - **Crash isolation** — a widget that crashes ends only its own process, which is started again;
   SpringBoard stays up. A part that keeps crashing is stopped (reset it in the settings).
 

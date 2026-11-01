@@ -117,13 +117,11 @@ The heavy steps run on a background queue.
    `containerURLForSecurityApplicationGroupIdentifier:`, `NSUserDefaults(suiteName:)` and
    CFPreferences are redirected to the app's own data container. The widget then reads the same
    data as the app.
-6. **Bundle.main** — When called from the extension's code, `Bundle.main` returns the
-   extension's bundle, so its images and localized strings are found. Some texts are looked up
-   by the system's code instead, while the widget is drawn — SwiftUI's `Text("key")` and
-   `String(localized:)` — and those go to the host's own bundle. For the two `NSBundle` methods
-   they use (`localizedAttributedStringForKey:value:table:localization:` and
-   `_localizedStringForKey:value:table:localizations:`), a key that bundle does not have is
-   looked up in the extension's bundle too.
+6. **Bundle.main** — The host exists for one extension, so `Bundle.main` returns the
+   extension's bundle for every caller, as in an iOS extension process: the extension's code,
+   its app's frameworks, and the system's code that looks things up while the widget is drawn
+   (`UIImage(named:)`, SwiftUI's `Image("name")` and `Text("key")`, `String(localized:)`).
+   Code of the app's Intents extension, when it is loaded, gets that extension's bundle.
 7. **Read the widgets (main thread)** — Find `WidgetBundle` / `Widget` in the extension's Swift
    type information (the `__swift5_proto` conformance records), run the app's `init()` and
    `body`, and walk the configuration tree. For each widget this yields its kind, its timeline
@@ -279,6 +277,16 @@ reach SpringBoard, it also checks those files' dates every 5 s.
 - **Widgets are shown live.** SpringBoard shows the widget's own layers from the host; 2.0.0
   showed images the host took of them. What SwiftUI changes by itself now plays on the home
   screen: a timer counts down second by second (measured with a timer widget).
+- **Widget backgrounds are drawn.** A background given with `.containerBackground(…, for:
+  .widget)` (iOS 17 and later) is handed to the widget's container, not drawn by the view
+  itself, so it was missing. The host now plays the container: it wraps the view with SwiftUI's
+  `applyContainerBackground(for:isEnabled:)` for WidgetKit's placement key, which draws that
+  background behind the view (for example Spotify's colored background).
+- **Images in the extension's bundle are found.** `Bundle.main` is now the extension's bundle
+  for every caller in the host, not only for the extension's own code, so images UIKit or
+  SwiftUI look up there (for example a timer app's theme pictures, loaded with
+  `UIImage(named:)`) are found. The fallback that looked up missing texts in the extension's
+  strings is no longer needed and was removed.
 - After a respring, widgets on a page that held only widgets ended up on another page (with
   the app icons pushed to the next page): SpringBoardHome drops that page together with the
   widgets while importing the layout, so the pages after it moved up. The page is now made

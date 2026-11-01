@@ -641,10 +641,11 @@ static void WPDumpStructFields(const void *metadata, int depth, NSMutableString 
 
 #pragma mark - Main bundle redirect
 
-// Code inside the widget extension that asks for Bundle.main expects its own bundle,
-// not SpringBoard's. Only calls coming from the extension's own code are redirected,
-// so SpringBoard and everything else keep seeing the real main bundle.
-static uintptr_t gWPImageStart, gWPImageEnd;
+// A widget host exists for one widget extension, so Bundle.main is the extension's bundle for
+// every caller, as in an iOS extension process: the extension's code, its app's frameworks, and
+// the system's code drawing it (UIImage(named:), SwiftUI's Image("name") and Text("key"),
+// String(localized:)). Code of another extension loaded with it (the app's Intents extension)
+// gets that extension's bundle instead.
 static NSBundle *gWPExtensionBundle;
 static IMP gWPOrigMainBundle;
 
@@ -654,10 +655,10 @@ static int gWPExtraCount;
 
 static NSBundle *WPMainBundleHook(id self, SEL _cmd) {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
-    if (gWPExtensionBundle && caller >= gWPImageStart && caller < gWPImageEnd) return gWPExtensionBundle;
     for (int i = 0; i < gWPExtraCount; i++) {
         if (caller >= gWPExtraStart[i] && caller < gWPExtraEnd[i]) return gWPExtraBundles[i];
     }
+    if (gWPExtensionBundle) return gWPExtensionBundle;
     return ((NSBundle *(*)(id, SEL))gWPOrigMainBundle)(self, _cmd);
 }
 
@@ -674,9 +675,9 @@ static uint64_t WPTextSize(const struct mach_header *mh) {
     return 0;
 }
 
-static NSObject *WPRedirectLock(void);
-
-// Another extension image (e.g. the Intents extension) whose Bundle.main is its own bundle.
+// Another extension image (the Intents extension) whose Bundle.main is its own bundle.
+// Registered on the main thread before anything there can call into it; the table is read
+// from any thread without a lock.
 static void WPAddBundleRedirect(const struct mach_header *mh, NSString *bundlePath) {
     if (gWPExtraCount >= 16) return;
     uint64_t size = WPTextSize(mh);
@@ -684,107 +685,20 @@ static void WPAddBundleRedirect(const struct mach_header *mh, NSString *bundlePa
     if (!gWPExtraBundles) gWPExtraBundles = [NSMutableArray array];
     NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
     if (!bundle) return;
-    @synchronized (WPRedirectLock()) {
-        gWPExtraStart[gWPExtraCount] = (uintptr_t)mh;
-        gWPExtraEnd[gWPExtraCount] = (uintptr_t)mh + size;
-        [gWPExtraBundles addObject:bundle];
-        gWPExtraCount++;
-    }
+    gWPExtraStart[gWPExtraCount] = (uintptr_t)mh;
+    gWPExtraEnd[gWPExtraCount] = (uintptr_t)mh + size;
+    [gWPExtraBundles addObject:bundle];
+    gWPExtraCount++;
 }
 
-// A widget's texts are looked up while it is drawn, through Bundle.main as seen from the
-// system's code — SpringBoard's bundle. When a key is missing there, it is looked up in the
-// loaded extensions' bundles too (SpringBoard's own strings are found first, as before).
-// Two NSBundle methods are used for this (seen in the diagnostic log):
-//   localizedAttributedStringForKey:value:table:localization:  SwiftUI's Text("key")
-//   _localizedStringForKey:value:table:localizations:          String(localized:)
-// Both take (key, value, table, localization(s)) and return a string.
-static NSBundle *gWPSpringBoardBundle;
-static NSString *const kWPMissing = @"\x01wp-missing";
-static SEL gWPLookupSel[2];
-static IMP gWPLookupOrig[2];
-
-// Lookups can come from any thread; the list grows on the main thread as extensions load.
-static NSObject *WPRedirectLock(void) {
-    static NSObject *lock;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ lock = [NSObject new]; });
-    return lock;
-}
-
-static NSArray<NSBundle *> *WPExtensionBundles(void) {
-    NSMutableArray *list = [NSMutableArray array];
-    @synchronized (WPRedirectLock()) {
-        if (gWPExtensionBundle) [list addObject:gWPExtensionBundle];
-        for (int i = 0; i < gWPExtraCount; i++) [list addObject:gWPExtraBundles[i]];
-    }
-    return list;
-}
-
-static BOOL WPLookupMissed(id found) {
-    if ([found isKindOfClass:[NSAttributedString class]]) found = [found string];
-    return !found || [found isEqual:kWPMissing];
-}
-
-static id WPLocalizedHook(NSBundle *self, SEL _cmd, NSString *key, NSString *value, NSString *table, id localization) {
-    typedef id (*Fn)(id, SEL, NSString *, NSString *, NSString *, id);
-    Fn orig = (Fn)(_cmd == gWPLookupSel[0] ? gWPLookupOrig[0] : gWPLookupOrig[1]);
-    if (self != gWPSpringBoardBundle || ![key isKindOfClass:[NSString class]] || !key.length)
-        return orig(self, _cmd, key, value, table, localization);
-    id found = orig(self, _cmd, key, kWPMissing, table, localization);
-    if (!WPLookupMissed(found)) return found;
-    for (NSBundle *b in WPExtensionBundles()) {
-        found = orig(b, _cmd, key, kWPMissing, table, localization);
-        if (!WPLookupMissed(found)) return found;
-    }
-    return orig(self, _cmd, key, value, table, localization);
-}
-
-static void WPInstallLocalizationFallback(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        gWPSpringBoardBundle = ((NSBundle *(*)(id, SEL))gWPOrigMainBundle)([NSBundle class], @selector(mainBundle));
-        NSArray *names = @[ @"localizedAttributedStringForKey:value:table:localization:", @"_localizedStringForKey:value:table:localizations:" ];
-        for (int i = 0; i < 2; i++) {
-            gWPLookupSel[i] = NSSelectorFromString(names[i]);
-            Method m = class_getInstanceMethod([NSBundle class], gWPLookupSel[i]);
-            if (!m) continue;
-            // Recorded before the swap: another thread may call the method right after it.
-            gWPLookupOrig[i] = method_getImplementation(m);
-            method_setImplementation(m, (IMP)WPLocalizedHook);
-        }
-    });
-}
-
-static void WPInstallMainBundleRedirect(const struct mach_header *mh, NSString *bundlePath, NSMutableString *log) {
-    const struct mach_header_64 *h = (const struct mach_header_64 *)mh;
-    const uint8_t *cmd = (const uint8_t *)(h + 1);
-    uint64_t textVM = 0, textSize = 0;
-    for (uint32_t i = 0; i < h->ncmds; i++) {
-        const struct load_command *lc = (const void *)cmd;
-        if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *seg = (const void *)lc;
-            if (strcmp(seg->segname, "__TEXT") == 0) { textVM = seg->vmaddr; textSize = seg->vmsize; break; }
-        }
-        cmd += lc->cmdsize;
-    }
-    if (!textSize) return;
-    if (gWPExtensionBundle) {
-        // Another extension is already redirected: add this one alongside it.
-        if ((uintptr_t)mh != gWPImageStart) WPAddBundleRedirect(mh, bundlePath);
-        return;
-    }
-    gWPImageStart = (uintptr_t)mh;
-    gWPImageEnd = (uintptr_t)mh + textSize;
-    (void)textVM;
-    NSBundle *extensionBundle = [NSBundle bundleWithPath:bundlePath];
-    @synchronized (WPRedirectLock()) { gWPExtensionBundle = extensionBundle; }
+static void WPInstallMainBundleRedirect(NSString *bundlePath, NSMutableString *log) {
+    if (gWPExtensionBundle) return;
+    gWPExtensionBundle = [NSBundle bundleWithPath:bundlePath];
     if (!gWPOrigMainBundle) {
         Method m = class_getClassMethod([NSBundle class], @selector(mainBundle));
         gWPOrigMainBundle = method_setImplementation(m, (IMP)WPMainBundleHook);
     }
-    WPInstallLocalizationFallback();
-    WPLOG(log, @"    Bundle.main redirect: returns %@ only when called from the extension's code", gWPExtensionBundle.bundleIdentifier ?: bundlePath.lastPathComponent);
+    WPLOG(log, @"    Bundle.main: %@", gWPExtensionBundle.bundleIdentifier ?: bundlePath.lastPathComponent);
 }
 
 #pragma mark - Widget configurations: providers and their views
@@ -2437,23 +2351,9 @@ static void WPPreloadIntentsExtension(WPWidgetExtension *ext, NSMutableString *l
     NSString *bundleCopy = nil;
     const struct mach_header *mh = WPRuntimeLoad(ext, &bundleCopy, log);
     WPSetUpAppGroups(ext, log);
-    if (mh) {
-        // Frameworks of the app loaded for this extension (e.g. its shared UI code) look up
-        // their strings and images through Bundle.main as well.
-        for (NSArray *img in WPLoadedImages()) {
-            NSString *path = img[0];
-            NSString *appTail = [NSString stringWithFormat:@"%@/%@/Frameworks/", ext.appPath.stringByDeletingLastPathComponent.lastPathComponent,
-                                 ext.appPath.lastPathComponent];
-            BOOL appFramework = [path containsString:appTail] ||
-                                [path containsString:[ext.extensionPath.lastPathComponent stringByAppendingString:@"/Frameworks/"]];
-            if (!appFramework) continue;
-            WPAddBundleRedirect([img[1] pointerValue], bundleCopy);
-            WPLOG(log, @"  Bundle.main redirect (framework): %@", path.lastPathComponent);
-        }
-    }
     NSMutableArray *widgets = [NSMutableArray array];
     if (mh) {
-        WPInstallMainBundleRedirect(mh, bundleCopy, log);
+        WPInstallMainBundleRedirect(bundleCopy, log);
         gWPCurrentExtension = ext;
         gWPConfigCount = 0;
         gWPBoxCount = 0;
@@ -2628,6 +2528,136 @@ static UIViewController *WPHostView(void *view, const void *viewType) {
     return controller ? (__bridge_transfer UIViewController *)controller : nil;
 }
 
+#pragma mark The widget's container background
+
+// Since iOS 17 a widget sets its background with .containerBackground(…, for: .widget). That
+// background is not part of the view as drawn: it is handed up to the widget's container, which
+// iOS draws behind the view. The host is that container here: SwiftUI's
+// View.applyContainerBackground(for: Key.self, isEnabled: true) — what a container calls with
+// its placement key — draws a background given for that placement behind the view.
+// .widget is ContainerBackgroundPlacement.custom(WidgetKey.self) with a key type of WidgetKit's.
+// The key protocol (ContainerBackgroundPlacementCustomKey) is a marker protocol: it has no
+// witness table, so the generic arguments are Self, Key and Self's View conformance (as the
+// result type's descriptor shows: parameters Self, Key and the result; requirements Self: View
+// and result: View).
+
+typedef void (*WPApplyContainerBackground)(void *out __attribute__((swift_indirect_result)), const void *keyMetatype, bool isEnabled,
+                                           const void *selfType, const void *keyType, const void *selfViewWT,
+                                           const void *selfValue __attribute__((swift_context))) SWIFTCALL;
+typedef WPMetadataResponse (*WPGetOpaqueTypeMetadata)(size_t request, const void *const *arguments, const void *descriptor,
+                                                      uintptr_t index) SWIFTCALL;
+// ContainerBackgroundPlacement is a resilient SwiftUI struct: outside SwiftUI its values are
+// returned through the indirect result register.
+typedef void (*WPStaticGetter)(void *out __attribute__((swift_indirect_result))) SWIFTCALL;
+
+typedef struct {
+    WPApplyContainerBackground apply;
+    const void *opaqueDescriptor;
+    WPGetOpaqueTypeMetadata opaqueMetadata;
+    const void *keyType;
+    const void *viewProto;
+    WPConformsToProtocol conformsTo;
+} WPContainerBackgroundCalls;
+
+// Whether the result type's descriptor has exactly the generic signature the call is made for:
+// parameters x (Self), qd__ (Key), qd0__ (the result); requirements x: View, qd0__: View.
+static NSString *WPCheckContainerBackgroundSignature(const uint8_t *d) {
+    uint32_t flags = *(const uint32_t *)d;
+    uint16_t numParams = *(const uint16_t *)(d + 8), numReqs = *(const uint16_t *)(d + 10);
+    if ((flags & 0x1F) != 4 || !(flags & 0x80) || numParams > 8 || numReqs > 8) return @"not a generic result type";
+    NSMutableArray *reqs = [NSMutableArray array];
+    const uint8_t *r = d + 16 + ((numParams + 3) & ~3u);
+    for (uint16_t i = 0; i < numReqs; i++, r += 12) {
+        const char *param = WPRelDirect((const int32_t *)(r + 4));
+        uint32_t kind = *(const uint32_t *)r & 0x1F;
+        const uint8_t *proto = kind == 0 ? WPRelIndirectable((const int32_t *)(r + 8)) : NULL;
+        const char *protoName = proto ? WPRelDirect((const int32_t *)(proto + 8)) : NULL;
+        [reqs addObject:[NSString stringWithFormat:@"%.8s: %s", param ?: "?", protoName ?: "?"]];
+    }
+    NSString *found = [reqs componentsJoinedByString:@", "];
+    if (numParams != 3 || ![found isEqualToString:@"x: View, qd0__: View"]) {
+        return [NSString stringWithFormat:@"%u parameters, requirements %@", numParams, found];
+    }
+    return nil;
+}
+
+// Looked up once; NULL when this iOS has no container backgrounds (before 17) or something
+// is not as expected (logged).
+static const WPContainerBackgroundCalls *WPContainerBackground(void) {
+    static WPContainerBackgroundCalls calls;
+    static const WPContainerBackgroundCalls *result;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *problem = nil;
+        calls.apply = (WPApplyContainerBackground)dlsym(RTLD_DEFAULT,
+            "$s7SwiftUI4ViewPAAE24applyContainerBackground3for9isEnabledQrqd__m_SbtAA0eF18PlacementCustomKeyRd__lF");
+        calls.opaqueDescriptor = dlsym(RTLD_DEFAULT,
+            "$s7SwiftUI4ViewPAAE24applyContainerBackground3for9isEnabledQrqd__m_SbtAA0eF18PlacementCustomKeyRd__lFQOMQ");
+        calls.opaqueMetadata = (WPGetOpaqueTypeMetadata)dlsym(RTLD_DEFAULT, "swift_getOpaqueTypeMetadata2");
+        calls.viewProto = dlsym(RTLD_DEFAULT, "$s7SwiftUI4ViewMp");
+        calls.conformsTo = (WPConformsToProtocol)dlsym(RTLD_DEFAULT, "swift_conformsToProtocol");
+        WPStaticGetter widgetPlacement = (WPStaticGetter)dlsym(RTLD_DEFAULT, "$s7SwiftUI28ContainerBackgroundPlacementV9WidgetKitE6widgetACvgZ");
+        WPMetadataAccessor placementAccessor = (WPMetadataAccessor)dlsym(RTLD_DEFAULT, "$s7SwiftUI28ContainerBackgroundPlacementVMa");
+        if (!calls.apply || !calls.opaqueDescriptor) problem = @"View.applyContainerBackground not found";
+        else if (!widgetPlacement || !placementAccessor) problem = @"ContainerBackgroundPlacement.widget not found";
+        else if (!calls.opaqueMetadata || !calls.viewProto || !calls.conformsTo) problem = @"a Swift runtime function not found";
+        else {
+            NSString *signature = WPCheckContainerBackgroundSignature(calls.opaqueDescriptor);
+            if (signature) problem = [@"unexpected signature: " stringByAppendingString:signature];
+        }
+        // The key type, held by the .widget placement value: a struct or an enum (kind 0x200 /
+        // 0x201) with a descriptor, read only through a pointer into a loaded image.
+        if (!problem) {
+            const void *placementType = placementAccessor(0).metadata;
+            void *placement = placementType && WPVWT(placementType)->size >= sizeof(void *) ? WPAllocValue(placementType) : NULL;
+            if (!placement) {
+                problem = @"unexpected placement layout";
+            } else {
+                widgetPlacement(placement);
+                const uintptr_t *candidate = *(const uintptr_t *const *)placement;
+                Dl_info where;
+                if ((uintptr_t)candidate > 0x100000000 && dladdr(candidate, &where) && where.dli_fbase &&
+                    (candidate[0] == 0x200 || candidate[0] == 0x201) && candidate[1]) {
+                    calls.keyType = candidate;
+                } else {
+                    problem = [NSString stringWithFormat:@"no key in the widget placement (%zu bytes, %p)", WPVWT(placementType)->size,
+                                                         ((void **)placement)[0]];
+                }
+            }
+        }
+        if (problem) {
+            WPRuntimeLog(@"  container background: not drawn (%@)", problem);
+        } else {
+            WPRuntimeLog(@"  container background: drawn behind the widget (placement key %@)", WPTypeName(calls.keyType));
+            result = &calls;
+        }
+    });
+    return result;
+}
+
+// The view with its widget container background behind it, or NULL (then the view is used
+// as it is). On success the original value is destroyed.
+static void *WPWithContainerBackground(void *view, const void *viewType, const void **outType) {
+    const WPContainerBackgroundCalls *c = WPContainerBackground();
+    if (!c) return NULL;
+    const void *viewWT = c->conformsTo(viewType, c->viewProto);
+    if (!viewWT) return NULL;
+    // The result type's descriptor lists the result itself as a third parameter. Whether the
+    // runtime then expects Self's conformance after two or after three type arguments, this
+    // buffer has it in both places (the result's own slots are not read for its underlying type).
+    const void *arguments[5] = { viewType, c->keyType, viewWT, viewWT, NULL };
+    const void *resultType = c->opaqueMetadata(0, arguments, c->opaqueDescriptor, 0).metadata;
+    if (!resultType) return NULL;
+    void *result = WPAllocValue(resultType);
+    if (!result) return NULL;
+    c->apply(result, c->keyType, true, viewType, c->keyType, viewWT, view);
+    typedef void (*WPDestroy)(void *value, const void *type);
+    ((WPDestroy)WPVWT(viewType)->functions[1])(view, viewType);
+    free(view);
+    *outType = resultType;
+    return result;
+}
+
 // Calls the stored "(Entry) -> Content" view builder; Content may be AnyView or the app's own view type.
 static UIViewController *WPRenderEntryGeneric(const void *generatorClosure, const void *generatorType, const void *entry) {
     const void *resultType = ((const void *const *)generatorType)[2];
@@ -2635,6 +2665,9 @@ static UIViewController *WPRenderEntryGeneric(const void *generatorClosure, cons
     if (!view) return nil;
     const void *const *pair = generatorClosure;
     ((WPContentFn)pair[0])(view, entry, pair[1]);
+    const void *backgroundType = NULL;
+    void *withBackground = WPWithContainerBackground(view, resultType, &backgroundType);
+    if (withBackground) return WPHostView(withBackground, backgroundType);
     return WPHostView(view, resultType);
 }
 
