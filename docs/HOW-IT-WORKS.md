@@ -10,7 +10,7 @@ The tweak is loaded into SpringBoard (and, for links, into apps) by ElleKit, thr
 ElleKit's function hooks are not used: everything is hooked through the Objective-C runtime
 (`method_setImplementation`).
 
-This document describes version 1.0.1.
+This document describes version 1.0.2.
 
 ## At a glance
 
@@ -221,6 +221,12 @@ reach SpringBoard, it also checks those files' dates every 5 s.
 - `report.txt` — details of loading extensions (with the diagnostic log on).
 - `runtime-<extension id>/` — the extension's copy and caches.
 - `*.running` / `*.bad` — crash markers.
+
+## Changes in 1.0.2
+
+- The home screen asks a widget's view controller for `visibleBounds` (the part of the icon's
+  content that shows) when edit mode starts. It is now answered with the widget's bounds;
+  1.0.1 answered zero. No visible difference has been seen.
 
 ## Changes in 1.0.1
 

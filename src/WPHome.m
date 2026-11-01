@@ -390,6 +390,18 @@ static NSMethodSignature *WPFallbackSignature(SEL sel) {
     return nil;
 }
 
+// visibleBounds: the part of the icon's content that shows. The ROM asks for it in edit mode;
+// a widget shows its whole view. Answered here, with the protocol's own return type, so a
+// different type in another ROM build still gets the zero fallback.
+static BOOL WPAnswerVisibleBounds(NSInvocation *invocation, UIViewController *vc, CGSize imageSize) {
+    if (invocation.selector != NSSelectorFromString(@"visibleBounds")) return NO;
+    if (strncmp(invocation.methodSignature.methodReturnType, "{CGRect=", 8) != 0) return NO;
+    CGRect r = vc.isViewLoaded ? vc.view.bounds : CGRectZero;
+    if (r.size.width < 1 || r.size.height < 1) r = (CGRect){ CGPointZero, imageSize };
+    [invocation setReturnValue:&r];
+    return YES;
+}
+
 static void WPForwardAsZero(NSInvocation *invocation) {
     static NSMutableSet *seen;
     if (!seen) seen = [NSMutableSet set];
@@ -699,6 +711,7 @@ static BOOL WPViewOnScreen(UIView *view) {
 }
 
 - (void)forwardInvocation:(NSInvocation *)invocation {
+    if (WPAnswerVisibleBounds(invocation, self, _info.size)) return;
     WPForwardAsZero(invocation);
 }
 
@@ -828,6 +841,7 @@ static void WPIconObserve(id icon, id observer, BOOL add) {
 }
 
 - (void)forwardInvocation:(NSInvocation *)invocation {
+    if (WPAnswerVisibleBounds(invocation, self, _info.size)) return;
     WPForwardAsZero(invocation);
 }
 
