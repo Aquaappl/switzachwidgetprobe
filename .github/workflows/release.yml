@@ -1,17 +1,13 @@
-# Publishes a release when the package version goes up.
+# Publishes a release of the branch it is run on, by hand.
 #
-# The version is the "Version:" line of layout/DEBIAN/control. On a push to main that changes
-# that file (or this workflow), the package is built and released as v<version> with the .deb
-# attached as SwitzachWidgetProbe.deb (a fixed name, so releases/latest/download/... always
-# gets the newest), unless that release already exists. Other commits do not make a release.
+# Actions › Release › Run workflow, and pick the branch (v1.x or v2.x). The version is that
+# branch's "Version:" line in layout/DEBIAN/control. The package is built and released as
+# v<version> with the .deb attached as SwitzachWidgetProbe.deb, unless that release already
+# exists. The release is marked latest only when its version is the highest released, so
+# releases/latest/download/SwitzachWidgetProbe.deb always gets the newest version.
 name: Release
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - layout/DEBIAN/control
-      - .github/workflows/release.yml
   workflow_dispatch:
 
 permissions:
@@ -71,7 +67,12 @@ jobs:
           # releases/latest/download/SwitzachWidgetProbe.deb always gets the newest one.
           # (The version is in the package itself and in the release's title.)
           mv build/*.deb "$RUNNER_TEMP/SwitzachWidgetProbe.deb"
+          # Latest only if no higher version was released (a v1.x release after a v2.x one is not).
+          highest=$( (gh release list --limit 200 --json tagName --jq '.[].tagName' | sed 's/^v//'; echo "$version") | sort -V | tail -1)
+          latest=false
+          [ "$highest" = "$version" ] && latest=true
           gh release create "v$version" "$RUNNER_TEMP/SwitzachWidgetProbe.deb" \
+            --latest="$latest" \
             --target "$GITHUB_SHA" \
             --title "SwitzachWidgetProbe $version" \
             --notes-file "$RUNNER_TEMP/notes.md"
