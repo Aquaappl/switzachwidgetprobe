@@ -6,6 +6,8 @@ Apps you install in the Switzach ROM ship their own WidgetKit extensions, but th
 screen has nothing that runs them. SwitzachWidgetProbe loads each app's widget extension inside
 SpringBoard and draws the widgets with the app's own SwiftUI code.
 
+How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+
 ## Features
 
 - **Widget gallery** — the home screen's **+** button › **Add Widget** lists every app with
