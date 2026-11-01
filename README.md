@@ -38,9 +38,11 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
 
 ## Install
 
-Download the `.deb` from [Releases](https://github.com/Aquaappl/switzachwidgetprobe/releases)
-(or build it, below) and install it with your package manager (for example Sileo), then
-respring.
+Download the latest `.deb`:
+**[SwitzachWidgetProbe.deb](https://github.com/Aquaappl/switzachwidgetprobe/releases/latest/download/SwitzachWidgetProbe.deb)**
+(always the newest release; older versions are on
+[Releases](https://github.com/Aquaappl/switzachwidgetprobe/releases)). Or build it (below).
+Install it with your package manager (for example Sileo), then respring.
 
 A release is published automatically whenever the package version goes up
 (`.github/workflows/release.yml`).

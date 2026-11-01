@@ -2,7 +2,8 @@
 #
 # The version is the "Version:" line of layout/DEBIAN/control. On a push to main that changes
 # that file (or this workflow), the package is built and released as v<version> with the .deb
-# attached, unless that release already exists. Other commits do not make a release.
+# attached as SwitzachWidgetProbe.deb (a fixed name, so releases/latest/download/... always
+# gets the newest), unless that release already exists. Other commits do not make a release.
 name: Release
 
 on:
@@ -66,7 +67,11 @@ jobs:
           commit=$(git log -1 --format=%H -G '^Version:' -- layout/DEBIAN/control)
           git log -1 --format=%b "$commit" | grep -v -E '^(Co-Authored-By|Signed-off-by):' > "$RUNNER_TEMP/notes.md" || true
           [ -s "$RUNNER_TEMP/notes.md" ] || echo "SwitzachWidgetProbe $version" > "$RUNNER_TEMP/notes.md"
-          gh release create "v$version" build/*.deb \
+          # One file under a fixed name, so that
+          # releases/latest/download/SwitzachWidgetProbe.deb always gets the newest one.
+          # (The version is in the package itself and in the release's title.)
+          mv build/*.deb "$RUNNER_TEMP/SwitzachWidgetProbe.deb"
+          gh release create "v$version" "$RUNNER_TEMP/SwitzachWidgetProbe.deb" \
             --target "$GITHUB_SHA" \
             --title "SwitzachWidgetProbe $version" \
             --notes-file "$RUNNER_TEMP/notes.md"
