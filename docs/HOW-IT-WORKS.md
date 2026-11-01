@@ -14,7 +14,7 @@ The tweak is loaded into SpringBoard (and, for links, into apps) by ElleKit, thr
 ElleKit's function hooks are not used: everything is hooked through the Objective-C runtime
 (`method_setImplementation`).
 
-This document describes version 2.0.0.
+This document describes version 2.0.1.
 
 ## At a glance
 
@@ -274,15 +274,18 @@ reach SpringBoard, it also checks those files' dates every 5 s.
 - `hosts-stderr.txt` — the hosts' own error output (with the diagnostic log on).
 - `*.running` / `*.bad` — crash markers.
 
+## Changes in 2.0.1
+
+- **Widgets are shown live.** SpringBoard shows the widget's own layers from the host; 2.0.0
+  showed images the host took of them. What SwiftUI changes by itself now plays on the home
+  screen: a timer counts down second by second (measured with a timer widget).
+
 ## Changes in 2.0.0
 
 - **Widgets run in their own processes.** Each app's widget extension runs in a
   `SwitzachWidgetHost` process instead of SpringBoard; SpringBoard shows what it drew. A crash
   in a widget no longer takes the home screen down, and SpringBoard no longer loads any app's
   code.
-- **Widgets are shown live.** SpringBoard shows the widget's own layers from the host, not an
-  image of them, so what SwiftUI changes by itself plays on the home screen: a timer counts
-  down second by second (measured with a timer widget).
 - The buttons' crash marker (`control2-…`) is gone: a button that crashes ends only its host.
 - Measured on a device: a host starts in 80–90 ms, loads YouTube's or Spotify's extension in
   37–86 ms, and draws a widget 2–500 ms after the request.
