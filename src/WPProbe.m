@@ -2525,7 +2525,14 @@ static UIViewController *WPHostView(void *view, const void *viewType) {
     if (!viewWT) return nil;
     const void *hostingType = hostingAccessor(0, viewType, viewWT).metadata;
     void *controller = hostingInit(view, hostingType); // takes the view (+1)
-    return controller ? (__bridge_transfer UIViewController *)controller : nil;
+    if (!controller) return nil;
+    // A widget has no safe area. The host's window is at the top of the screen, so on a device
+    // with a notch or Dynamic Island SwiftUI would inset the widget's content by the status bar
+    // area: UIHostingController.safeAreaRegions = [] (iOS 16.4).
+    typedef void (*WPSetSafeAreaRegions)(uintptr_t regions, void *controller __attribute__((swift_context))) SWIFTCALL;
+    WPSetSafeAreaRegions setRegions = (WPSetSafeAreaRegions)dlsym(RTLD_DEFAULT, "$s7SwiftUI19UIHostingControllerC15safeAreaRegionsAA04SafefG0Vvs");
+    if (setRegions) setRegions(0, controller);
+    return (__bridge_transfer UIViewController *)controller;
 }
 
 #pragma mark The widget's container background

@@ -14,7 +14,7 @@ The tweak is loaded into SpringBoard (and, for links, into apps) by ElleKit, thr
 ElleKit's function hooks are not used: everything is hooked through the Objective-C runtime
 (`method_setImplementation`).
 
-This document describes version 2.0.1.
+This document describes version 2.0.2.
 
 ## At a glance
 
@@ -271,6 +271,13 @@ reach SpringBoard, it also checks those files' dates every 5 s.
 - `SwitzachWidgetHost.app/` — the signed copy of the host that runs.
 - `hosts-stderr.txt` — the hosts' own error output (with the diagnostic log on).
 - `*.running` / `*.bad` — crash markers.
+
+## Changes in 2.0.2
+
+- On devices with a notch or the Dynamic Island, a widget's content was pushed down by the
+  height of the status bar area: the host's window is at the top of the screen, and SwiftUI
+  kept its content out of that safe area. Widgets have no safe area; the host now turns it off
+  (`UIHostingController.safeAreaRegions = []`).
 
 ## Changes in 2.0.1
 
