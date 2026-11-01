@@ -407,6 +407,17 @@ static void WPForwardAsZero(NSInvocation *invocation) {
 }
 
 
+// Whether the view shows on its window right now (not hidden, not on another page).
+static BOOL WPViewOnScreen(UIView *view) {
+    UIWindow *window = view.window;
+    if (!window || window.hidden || window.alpha < 0.01) return NO;
+    for (UIView *v = view; v; v = v.superview) {
+        if (v.hidden || v.alpha < 0.01) return NO;
+    }
+    CGRect r = CGRectIntersection([view convertRect:view.bounds toView:nil], window.bounds);
+    return !CGRectIsNull(r) && r.size.width > 1 && r.size.height > 1;
+}
+
 @implementation WPHomeWidgetViewController {
     SBIconImageInfo _info;
     UIViewController *_hosted;
@@ -416,6 +427,11 @@ static void WPForwardAsZero(NSInvocation *invocation) {
     int _attempts;
     NSUInteger _generation;
     NSTimer *_refreshTimer;
+    int _renderedFamily;
+    BOOL _rendering;            // a render waits for the app's timeline
+    BOOL _refreshAgain;         // another reload was asked for meanwhile
+    CFAbsoluteTime _hiddenSince; // a reload waits for the widget to be on screen
+    BOOL _hiddenCheck;
 }
 
 - (void)dealloc {
@@ -481,11 +497,7 @@ static void WPForwardAsZero(NSInvocation *invocation) {
     __weak typeof(self) weakSelf = self;
     for (NSNumber *delay in @[ @0.7, @2.5 ]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            WPHomeWidgetViewController *strong = weakSelf;
-            if (!strong) return;
-            strong->_renderedSize = CGSizeZero;
-            strong->_attempts = 0;
-            [strong render];
+            [weakSelf refresh];
         });
     }
     return YES;
@@ -500,9 +512,7 @@ static void WPForwardAsZero(NSInvocation *invocation) {
         WPHomeWidgetViewController *strong = weakSelf;
         if (!strong) return;
         WPHLog(@"Refresh: %@", strong.kind);
-        strong->_renderedSize = CGSizeZero;
-        strong->_attempts = 0;
-        [strong render];
+        [strong refresh];
     }];
     _refreshTimer.tolerance = 10;
 }
@@ -566,6 +576,40 @@ static void WPForwardAsZero(NSInvocation *invocation) {
 - (void)dataChanged:(NSNotification *)note {
     if (![note.object isEqual:self.extension.extensionBundleID]) return;
     WPHLog(@"App data changed, refreshing: %@", self.kind);
+    [self refresh];
+}
+
+// Reloads what is shown (the next timeline entry, after a button, when the app's data
+// changed). While a reload is still waiting for the app's timeline, more requests become one
+// reload after it. A widget that is not on screen (another page) waits until it is — at most
+// a minute, so it never stops updating.
+- (void)refresh {
+    if (!_hosted) {
+        _renderedSize = CGSizeZero;
+        _attempts = 0;
+        [self render];
+        return;
+    }
+    if (_rendering) {
+        _refreshAgain = YES;
+        return;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (!WPViewOnScreen(self.view) && (!_hiddenSince || now - _hiddenSince < 60)) {
+        if (!_hiddenSince) _hiddenSince = now;
+        if (!_hiddenCheck) {
+            _hiddenCheck = YES;
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                WPHomeWidgetViewController *strong = weakSelf;
+                if (!strong) return;
+                strong->_hiddenCheck = NO;
+                [strong refresh];
+            });
+        }
+        return;
+    }
+    _hiddenSince = 0;
     _renderedSize = CGSizeZero;
     _attempts = 0;
     [self render];
@@ -601,17 +645,34 @@ static void WPForwardAsZero(NSInvocation *invocation) {
     int family = WPFamilyForGridClass(self.gridSizeClass);
     __weak typeof(self) weakSelf = self;
     @try {
-        [WPProbe renderWidgetKind:self.kind extension:self.extension family:family size:size
+        // The placeholder only for the first drawing (or a new size); a refresh goes straight
+        // from what is shown to the new entry.
+        BOOL placeholder = !_hosted || family != _renderedFamily;
+        _renderedFamily = family;
+        _rendering = YES;
+        [WPProbe renderWidgetKind:self.kind extension:self.extension family:family size:size placeholder:placeholder
                            update:^(UIViewController *vc, NSDate *next, BOOL final) {
             WPHomeWidgetViewController *strong = weakSelf;
             if (!strong || generation != strong->_generation) return;
             if (vc) [strong showHosted:vc];
             else if (!strong->_hosted) strong->_status.text = @"Could not draw";
-            if (final) [strong scheduleRefreshAt:next];
+            if (final) {
+                [strong scheduleRefreshAt:next];
+                [strong renderFinished];
+            }
         }];
     } @catch (NSException *e) {
         WPHLog(@"Exception while drawing: %@", e.reason);
+        [self renderFinished];
     }
+}
+
+- (void)renderFinished {
+    _rendering = NO;
+    if (!_refreshAgain) return;
+    _refreshAgain = NO;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf refresh]; });
 }
 
 - (void)showHosted:(UIViewController *)vc {
@@ -1933,8 +1994,9 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
     [self buildSuggestions];
 }
 
-// Suggestions: widgets of apps whose extension is already loaded (no app code runs just for
-// opening the gallery). Small ones two to a row, larger ones full width, like iOS.
+// Suggestions: one widget per app (its first for the home screen), from apps whose extension
+// is already loaded (no app code runs just for opening the gallery). The app's row lists all of
+// them. Small ones two to a row, larger ones full width, like iOS.
 - (void)buildSuggestions {
     NSMutableArray *items = [NSMutableArray array];
     NSString *q = _search.text.length ? _search.text : nil;
@@ -1947,7 +2009,7 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
             NSString *family = WPFamiliesOfWidget(w).firstObject;
             if (!family) continue; // not for the home screen
             [items addObject:@{ @"ext" : ext, @"widget" : w, @"gridClass" : WPGridClassForFamilyName(family) }];
-            if (items.count >= 8) break;
+            break;
         }
         if (items.count >= 8) break;
     }

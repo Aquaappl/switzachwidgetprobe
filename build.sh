@@ -39,6 +39,7 @@ $CC -bundle -F"$SDK/System/Library/PrivateFrameworks" -framework Preferences -fr
     -o "$PREFS/SwitzachWidgetProbePrefs" \
     prefs/SWPRootListController.m
 cp prefs/Resources/* "$PREFS/"
+sed -i.bak "s/@VERSION@/$VERSION/g" "$PREFS/Info.plist" "$PREFS/Root.plist" && rm -f "$PREFS"/*.bak
 
 SIZE=$(du -sk "$STAGE/Library" | cut -f1)
 printf 'Installed-Size: %s\n' "$SIZE" >> "$STAGE/DEBIAN/control"

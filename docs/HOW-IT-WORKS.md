@@ -5,7 +5,12 @@ puts its widgets on the Switzach home screen the way iOS does. What a widget sho
 data behind it, come from the app's own SwiftUI code; the tweak stands in for the iOS system
 services (WidgetKit's host, chronod, linkd) that Switzach does not have.
 
-This document describes version 1.0.0.
+The tweak is loaded into SpringBoard (and, for links, into apps) by ElleKit, through the usual
+`Library/MobileSubstrate/DynamicLibraries` filters. Switzach does not allow patching code, so
+ElleKit's function hooks are not used: everything is hooked through the Objective-C runtime
+(`method_setImplementation`).
+
+This document describes version 1.0.1.
 
 ## At a glance
 
@@ -14,7 +19,7 @@ SpringBoard (SwitzachWidgetProbe.dylib)                      Each app (SwitzachW
 ├─ Tweak.m      entry point, "+ > Add Widget"                └─ WPLinks.m  receives widget links
 ├─ WPHome.m     home screen: icons, stacks, gallery,                      and hands the URL to the app
 │               removal, taps, refreshes
-├─ WPProbe.m    finds, loads and renders widget extensions   TweakSettings / Settings
+├─ WPProbe.m    finds, loads and renders widget extensions   TweakSettings
 │  └─ app's widget extension (.appex), loaded with dlopen    └─ SwitzachWidgetProbePrefs.bundle
 ├─ WPAsync.s    calls Swift async functions                     settings page
 └─ WPSettings.m settings, safety-guard reset  ◄── settings file + Darwin notification ──┘
@@ -24,7 +29,7 @@ SpringBoard (SwitzachWidgetProbe.dylib)                      Each app (SwitzachW
 
 | Feature | How to use it | Notes |
 | --- | --- | --- |
-| Add widgets | Home screen **+** › **Add Widget** | An iOS-style gallery: apps with widgets, live previews, names, descriptions, search |
+| Add widgets | Home screen **+** › **Add Widget** | An iOS-style gallery: one suggested widget per app with a live preview, the list of apps with widgets, search; an app's page shows all its widgets and sizes with names and descriptions |
 | Sizes | Pick small / medium / large in the gallery | Only the sizes the widget declares. Lock Screen–only widgets are not listed |
 | Stacks | Several widgets in one place | Swipe through, with page dots; the shown widget is remembered |
 | Removal | The − badge in edit mode, or the long-press menu | The iOS confirmation ("Remove “…” Widget?") |
@@ -62,20 +67,26 @@ The heavy steps run on a background queue, so the home screen does not freeze.
 3. **Preload frameworks (background)** — Load the frameworks the extension links through
    `@rpath` (e.g. RealmSwift) from the app's `Frameworks` first.
 4. **dlopen (background)** — Load the extension's executable into SpringBoard. Steps 2–4 took
-   640–1,120 ms in total on a device.
+   30–530 ms on a device with the earlier copy reused (copying and signing a new build takes
+   longer, once).
 5. **App Groups** — Find the extension's App Groups from its entitlements and the `group.…`
    strings in its binaries (cached). Switzach has no shared containers, so
    `containerURLForSecurityApplicationGroupIdentifier:`, `NSUserDefaults(suiteName:)` and
    CFPreferences are redirected to the app's own data container. The widget then reads the same
    data as the app.
 6. **Bundle.main** — When called from the extension's code, `Bundle.main` returns the
-   extension's bundle, so its images and localized strings are found.
+   extension's bundle, so its images and localized strings are found. Some texts are looked up
+   by the system's code instead, while the widget is drawn — SwiftUI's `Text("key")` and
+   `String(localized:)` — and those go to SpringBoard's bundle. For the two `NSBundle` methods
+   they use (`localizedAttributedStringForKey:value:table:localization:` and
+   `_localizedStringForKey:value:table:localizations:`), a key that SpringBoard's bundle does
+   not have is looked up in the loaded extensions' bundles too.
 7. **Read the widgets (main thread)** — Find `WidgetBundle` / `Widget` in the extension's Swift
    type information (the `__swift5_proto` conformance records), run the app's `init()` and
    `body`, and walk the configuration tree. For each widget this yields its kind, its timeline
    provider (`TimelineProvider`, `IntentTimelineProvider` or `AppIntentTimelineProvider`), the
    function that builds its view, and its name, description and supported sizes. This took
-   130–180 ms on a device.
+   22–155 ms on a device.
 
 A `WidgetBundle`'s `body` is main-actor isolated, so step 7 cannot move to a background thread.
 It runs once per extension per launch.
@@ -87,7 +98,8 @@ The tweak calls the app's own code in the order WidgetKit does on iOS.
 1. **Setup** — Build the `TimelineProviderContext` that WidgetKit would pass (family, size,
    …). A configurable widget gets its configuration type's default value (an `AppIntent`, or
    the Intents extension's `INIntent`), made once.
-2. **Placeholder** — `placeholder(in:)` is shown right away, until the timeline answers.
+2. **Placeholder** — Only for the first drawing and when the size changes: `placeholder(in:)`
+   is shown right away.
 3. **Timeline** — Call `getTimeline` (for App Intents widgets the `async`
    `timeline(for:in:)`) and show the entry for the current time. Swift `async` functions are
    called through `WPAsync.s`.
@@ -149,8 +161,9 @@ edit mode and icons making room work as the ROM does them.
   name is shown.
 - **Stacks** — One `SBWidgetIcon` with several widgets. The view controller pages through them
   with page dots and records the shown one with `setActiveWidget:`.
-- **Gallery** — "Add Widget" in the **+** menu opens an iOS-style sheet (search, the apps,
-  live previews per size). The chosen widget goes to the top of the current page and pushes the
+- **Gallery** — "Add Widget" in the **+** menu opens an iOS-style sheet: one suggested widget
+  per app at the top (only from apps already loaded, so opening the gallery runs no new app
+  code), the apps with widgets, and search. An app's page shows all its widgets in each size. The chosen widget goes to the top of the current page and pushes the
   other icons along.
 - **Removal** — The ROM shows the − badge only for apps; it is turned on for widgets as well,
   with the iOS confirmation before the widget is removed. The long-press menu asks the same.
@@ -166,40 +179,41 @@ therefore marked before they run, and a step that crashed is not run again.
 A marker is a file in the work folder. While a step runs, `<name>.running` holds SpringBoard's
 process id; it is removed when the step ends. A later SpringBoard that finds an earlier process's
 `.running` file knows that step crashed, turns it into `.bad`, and skips the step from then on.
+A respring while a step runs counts the same way, so the windows are kept short.
 
-| Guarded step | Marker | Once it crashed |
-| --- | --- | --- |
-| A widget's buttons | `control2-<extension>-<kind>` | The buttons are not run; a tap opens the app |
-| An App Intents widget's timeline (`async`) | `async2-<extension>-<kind>` | The placeholder stays |
-| Reading names, descriptions and sizes | `descriptor-<extension>` | The widgets are listed without them |
-| The Intents extension's defaults | `intent-defaults-<extension>` | Not used (not reset by the reset) |
+| Guarded step | Marker | Removed | Once it crashed |
+| --- | --- | --- | --- |
+| A widget's buttons | `control2-<extension>-<kind>` | 5 s after the tap (the action runs asynchronously) | The buttons are not run; a tap opens the app |
+| An App Intents widget's timeline (`async`) | `async2-<extension>-<kind>` | When the call returns and its entry is drawn (after 15 s if it never returns) | The placeholder stays |
+| Reading names, descriptions and sizes | `descriptor-<extension>` | When the reading ends | The widgets are listed without them |
+| The Intents extension's defaults | `intent-defaults-<extension>` | When they are made | Not used, and the Intents extension is not loaded (not reset by the reset) |
 
 Also:
 
-- **Launch guard** — If SpringBoard dies within 12 s of launch twice in a row, widgets are not
-  drawn on the next launch, so the widget at fault can be removed.
-- **Crash records** — Signals, exceptions and main-thread stalls of 4 s or more are written to
-  `runtime.txt`, with where they happened, even when the diagnostic log is off.
+- **Launch guard** — If SpringBoard ends within 12 s of launch twice in a row (crashes, or
+  resprings that soon), widgets are not drawn on the next launch, so the widget at fault can be
+  removed.
+- **Crash records** — Signals and exceptions are written to `runtime.txt`, with where they
+  happened, even when the diagnostic log is off.
 
 The Intents extension's defaults are never reset: loading a second copy of the app's code (such
 as the app's own Firebase) into the same process cannot work.
 
 ## Settings and logs
 
-The settings live in TweakSettings (or Settings) › **SwitzachWidgetProbe**, a PreferenceLoader
-bundle.
+The settings live in TweakSettings › **SwitzachWidgetProbe**, a PreferenceLoader bundle.
 
 | Setting | Default | |
 | --- | --- | --- |
 | Reset Widget Safety Guards | — | Removes the crash markers (`.bad` / `.running`) so those parts are tried again |
-| Diagnostic Log | Off | Writes a detailed log to `runtime.txt`. Crash records are written either way |
+| Diagnostic Log | Off | Writes a detailed log to `runtime.txt`. Turning it on also starts the main-thread stall watchdog, which runs until the next respring |
 
 **How settings reach SpringBoard** — The values are stored in the `com.rinapple.switzachwidgetprobe`
 domain, and a change posts the Darwin notification `com.rinapple.switzachwidgetprobe/settings`. On
 Switzach a settings app may store the domain in its own data container, so SpringBoard reads
-CFPreferences, its own `Library/Preferences`, and the data containers of TweakSettings and
-Settings, and uses the newest. In case notifications do not reach SpringBoard, it also checks
-those files' dates every 5 s.
+CFPreferences, its own `Library/Preferences`, and the data container of TweakSettings (and of
+the Settings app, where there is one), and uses the newest. In case notifications do not
+reach SpringBoard, it also checks those files' dates every 5 s.
 
 **Logs** — In SpringBoard's `Library/Caches/SwitzachWidgetProbe/`:
 
@@ -207,6 +221,32 @@ those files' dates every 5 s.
 - `report.txt` — details of loading extensions (with the diagnostic log on).
 - `runtime-<extension id>/` — the extension's copy and caches.
 - `*.running` / `*.bad` — crash markers.
+
+## Changes in 1.0.1
+
+**Fixes**
+
+- Texts that SwiftUI or `String(localized:)` look up while drawing (for example a to-do app's
+  "Today") showed their key; they are now found in the extension's strings (step 6 above).
+- An App Intents widget could stay on its placeholder for good after a respring within 15 s of
+  drawing it: its crash marker was only removed after 15 s. It is now removed when the call
+  returns.
+
+**Performance**
+
+| Change | 1.0.0 | 1.0.1 |
+| --- | --- | --- |
+| Placeholder on refresh | Every refresh drew the placeholder and then the entry | Only the first drawing and size changes; a refresh goes straight to the new entry (no flicker) |
+| Overlapping refreshes | A button's two refreshes and a data change each fetched the app's timeline | Requests made while a fetch runs become one refresh after it |
+| Widgets off screen | Refreshed right away, even on other pages | Wait until they are on screen (at most 60 s, so they never stop updating) |
+| Intents extension switched off after a crash | Still loaded at every launch | Not loaded |
+| Gallery suggestions | Up to 8 previews, often all from one app (each runs the app's code) | One per app |
+| Main-thread stall watchdog | A timer woke SpringBoard every second | Only after the diagnostic log is turned on |
+
+Measured on a device with 1.0.1: loading an extension 30–530 ms in the background (earlier copy
+reused), reading its widgets 22–155 ms on the main thread, a refresh from request to the new
+entry on screen typically under 250 ms (median 79 ms). Reading the widgets is the app's
+`WidgetBundle`, which must run on the main thread; both happen once per extension per launch.
 
 ## Source layout
 
@@ -218,6 +258,6 @@ those files' dates every 5 s.
 | `src/WPAsync.s` | SpringBoard | Calling Swift `async` functions |
 | `src/WPSettings.m` | SpringBoard | Reading the settings; resetting the crash guards |
 | `src/WPLinks.m` | Each app | `SwitzachWidgetLinks`: receives a link's URL and hands it to the app |
-| `prefs/` | TweakSettings / Settings | The settings page (PreferenceLoader bundle) |
+| `prefs/` | TweakSettings | The settings page (PreferenceLoader bundle) |
 | `layout/` | — | Package metadata and injection filters |
 | `build.sh` | — | Builds everything and packages the `.deb` |

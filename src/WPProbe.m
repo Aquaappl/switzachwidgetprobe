@@ -668,6 +668,8 @@ static uint64_t WPTextSize(const struct mach_header *mh) {
     return 0;
 }
 
+static NSObject *WPRedirectLock(void);
+
 // Another extension image (e.g. the Intents extension) whose Bundle.main is its own bundle.
 static void WPAddBundleRedirect(const struct mach_header *mh, NSString *bundlePath) {
     if (gWPExtraCount >= 16) return;
@@ -676,10 +678,76 @@ static void WPAddBundleRedirect(const struct mach_header *mh, NSString *bundlePa
     if (!gWPExtraBundles) gWPExtraBundles = [NSMutableArray array];
     NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
     if (!bundle) return;
-    gWPExtraStart[gWPExtraCount] = (uintptr_t)mh;
-    gWPExtraEnd[gWPExtraCount] = (uintptr_t)mh + size;
-    [gWPExtraBundles addObject:bundle];
-    gWPExtraCount++;
+    @synchronized (WPRedirectLock()) {
+        gWPExtraStart[gWPExtraCount] = (uintptr_t)mh;
+        gWPExtraEnd[gWPExtraCount] = (uintptr_t)mh + size;
+        [gWPExtraBundles addObject:bundle];
+        gWPExtraCount++;
+    }
+}
+
+// A widget's texts are looked up while it is drawn, through Bundle.main as seen from the
+// system's code — SpringBoard's bundle. When a key is missing there, it is looked up in the
+// loaded extensions' bundles too (SpringBoard's own strings are found first, as before).
+// Two NSBundle methods are used for this (seen in the diagnostic log):
+//   localizedAttributedStringForKey:value:table:localization:  SwiftUI's Text("key")
+//   _localizedStringForKey:value:table:localizations:          String(localized:)
+// Both take (key, value, table, localization(s)) and return a string.
+static NSBundle *gWPSpringBoardBundle;
+static NSString *const kWPMissing = @"\x01wp-missing";
+static SEL gWPLookupSel[2];
+static IMP gWPLookupOrig[2];
+
+// Lookups can come from any thread; the list grows on the main thread as extensions load.
+static NSObject *WPRedirectLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSArray<NSBundle *> *WPExtensionBundles(void) {
+    NSMutableArray *list = [NSMutableArray array];
+    @synchronized (WPRedirectLock()) {
+        if (gWPExtensionBundle) [list addObject:gWPExtensionBundle];
+        for (int i = 0; i < gWPExtraCount; i++) [list addObject:gWPExtraBundles[i]];
+    }
+    return list;
+}
+
+static BOOL WPLookupMissed(id found) {
+    if ([found isKindOfClass:[NSAttributedString class]]) found = [found string];
+    return !found || [found isEqual:kWPMissing];
+}
+
+static id WPLocalizedHook(NSBundle *self, SEL _cmd, NSString *key, NSString *value, NSString *table, id localization) {
+    typedef id (*Fn)(id, SEL, NSString *, NSString *, NSString *, id);
+    Fn orig = (Fn)(_cmd == gWPLookupSel[0] ? gWPLookupOrig[0] : gWPLookupOrig[1]);
+    if (self != gWPSpringBoardBundle || ![key isKindOfClass:[NSString class]] || !key.length)
+        return orig(self, _cmd, key, value, table, localization);
+    id found = orig(self, _cmd, key, kWPMissing, table, localization);
+    if (!WPLookupMissed(found)) return found;
+    for (NSBundle *b in WPExtensionBundles()) {
+        found = orig(b, _cmd, key, kWPMissing, table, localization);
+        if (!WPLookupMissed(found)) return found;
+    }
+    return orig(self, _cmd, key, value, table, localization);
+}
+
+static void WPInstallLocalizationFallback(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        gWPSpringBoardBundle = ((NSBundle *(*)(id, SEL))gWPOrigMainBundle)([NSBundle class], @selector(mainBundle));
+        NSArray *names = @[ @"localizedAttributedStringForKey:value:table:localization:", @"_localizedStringForKey:value:table:localizations:" ];
+        for (int i = 0; i < 2; i++) {
+            gWPLookupSel[i] = NSSelectorFromString(names[i]);
+            Method m = class_getInstanceMethod([NSBundle class], gWPLookupSel[i]);
+            if (!m) continue;
+            // Recorded before the swap: another thread may call the method right after it.
+            gWPLookupOrig[i] = method_getImplementation(m);
+            method_setImplementation(m, (IMP)WPLocalizedHook);
+        }
+    });
 }
 
 static void WPInstallMainBundleRedirect(const struct mach_header *mh, NSString *bundlePath, NSMutableString *log) {
@@ -703,15 +771,17 @@ static void WPInstallMainBundleRedirect(const struct mach_header *mh, NSString *
     gWPImageStart = (uintptr_t)mh;
     gWPImageEnd = (uintptr_t)mh + textSize;
     (void)textVM;
-    gWPExtensionBundle = [NSBundle bundleWithPath:bundlePath];
+    NSBundle *extensionBundle = [NSBundle bundleWithPath:bundlePath];
+    @synchronized (WPRedirectLock()) { gWPExtensionBundle = extensionBundle; }
     if (!gWPOrigMainBundle) {
         Method m = class_getClassMethod([NSBundle class], @selector(mainBundle));
         gWPOrigMainBundle = method_setImplementation(m, (IMP)WPMainBundleHook);
     }
+    WPInstallLocalizationFallback();
     WPLOG(log, @"    Bundle.main redirect: returns %@ only when called from the extension's code", gWPExtensionBundle.bundleIdentifier ?: bundlePath.lastPathComponent);
 }
 
-#pragma mark - Phase 4/5: provider and first render
+#pragma mark - Widget configurations: providers and their views
 
 typedef struct {
     const void *value;
@@ -775,6 +845,8 @@ static BOOL WPMangledUsesGenerics(const uint8_t *m) {
     return NO;
 }
 
+// Walks a value's fields (logging them with the diagnostic log on). Along the way it records
+// what drawing needs: the provider box and the view-building function (see WPPhase4).
 static void WPDumpValue(const void *value, const void *md, NSString *label, int depth, int maxDepth, NSMutableString *log);
 
 static void WPDumpFields(const void *base, const void *md, const uint8_t *desc, BOOL isClass, int depth, int maxDepth,
@@ -915,6 +987,9 @@ static void *WPCallThunk(const void *closure, const void *fnType, const void **r
     return out;
 }
 
+// Stage 4 (not just a log): calls each configuration's provider() and walks the result with
+// WPDumpValue / WPDumpFields, which record the timeline provider (gWPBoxes) and the function
+// that builds the widget's view (gWPContent). Without it no widget is found.
 static void WPPhase4(NSMutableString *log) {
     for (int i = 0; i < gWPConfigCount; i++) {
         WPFoundConfig c = gWPConfigs[i];
@@ -2326,7 +2401,10 @@ static void WPPreloadIntentsExtension(WPWidgetExtension *ext, NSMutableString *l
         NSMutableString *log = [NSMutableString string];
         const struct mach_header *mh = WPRuntimeLoad(ext, NULL, log);
         WPAppGroupsForExtension(ext);
-        if (mh && !WPHasIntentCache(ext)) WPPreloadIntentsExtension(ext, log);
+        // The Intents extension is only for its defaults: not loaded when they are cached, or
+        // switched off after a crash (then they would never be cached, and it loaded each time).
+        NSString *defaultsMarker = [NSString stringWithFormat:@"intent-defaults-%@", extID];
+        if (mh && !WPHasIntentCache(ext) && !WPMarkerTripped(defaultsMarker)) WPPreloadIntentsExtension(ext, log);
         double background = (CFAbsoluteTimeGetCurrent() - start) * 1000;
         dispatch_async(dispatch_get_main_queue(), ^{
             for (NSString *line in [log componentsSeparatedByString:@"\n"]) if (line.length) WPRuntimeLog(@"%@", line);
@@ -2822,6 +2900,7 @@ static void WPRuntimeLog(NSString *fmt, ...) {
 }
 
 + (void)renderWidgetKind:(NSString *)kind extension:(WPWidgetExtension *)ext family:(int)family size:(CGSize)size
+             placeholder:(BOOL)wantPlaceholder
                   update:(void (^)(UIViewController *controller, NSDate *nextRefresh, BOOL final))update {
     NSArray *widgets = [self widgetsForExtension:ext];
     const WPProviderBox *found = NULL;
@@ -2834,6 +2913,7 @@ static void WPRuntimeLog(NSString *fmt, ...) {
         return;
     }
     WPProviderBox box = *found;
+    CFAbsoluteTime renderStart = CFAbsoluteTimeGetCurrent();
     if (!gWPLastRender) gWPLastRender = [NSMutableDictionary dictionary];
     gWPLastRender[ext.extensionBundleID] = @(CFAbsoluteTimeGetCurrent());
     for (NSString *g in gWPExtGroups[ext.extensionBundleID]) CFPreferencesAppSynchronize((__bridge CFStringRef)g);
@@ -2888,13 +2968,18 @@ static void WPRuntimeLog(NSString *fmt, ...) {
         return;
     }
 
-    // 1. placeholder(in:) — synchronous, shown right away.
-    void *placeholder = WPAllocValue(entryType);
-    ((WPPlaceholderFn)placeholderFn)(placeholder, context, providerType, wt, provider);
-    UIViewController *first = WPRenderEntryGeneric(generator, generatorType, placeholder);
-    WPLOG(log, @"  placeholder → %@ (view type %@)", first ? @"drawn" : @"failed", WPTypeName(((const void *const *)generatorType)[2]));
+    // 1. placeholder(in:) — synchronous, shown right away. A refresh of a widget already on
+    //    screen skips it: what is shown stays until the new entry is drawn.
+    if (wantPlaceholder) {
+        void *placeholder = WPAllocValue(entryType);
+        ((WPPlaceholderFn)placeholderFn)(placeholder, context, providerType, wt, provider);
+        UIViewController *first = WPRenderEntryGeneric(generator, generatorType, placeholder);
+        WPLOG(log, @"  placeholder → %@ in %.0f ms (view type %@)", first ? @"drawn" : @"failed",
+              (CFAbsoluteTimeGetCurrent() - renderStart) * 1000, WPTypeName(((const void *const *)generatorType)[2]));
+        gWPLogPath = savedPath;
+        update(first, nil, NO);
+    }
     gWPLogPath = savedPath;
-    update(first, nil, NO);
 
     // 2. getTimeline — asynchronous; the provider may take its time (network, shared data).
     const void *timelineType = timelineAccessor ? timelineAccessor(0, entryType, conformsTo(entryType, entryProto)).metadata : NULL;
@@ -2915,7 +3000,10 @@ static void WPRuntimeLog(NSString *fmt, ...) {
         }
         WPRuntimeLog(@"  %@ %@: %lu entries%@", kind, source, (unsigned long)entries.count,
                      isnan(next) ? @"" : [NSString stringWithFormat:@" (next change in %.0f s)", next - now]);
+        CFAbsoluteTime drawStart = CFAbsoluteTimeGetCurrent();
         UIViewController *vc = current ? WPRenderEntryGeneric(generator, generatorType, current) : nil;
+        WPRuntimeLog(@"  %@ drawn: %.0f ms after the request (view %.0f ms)", kind, (CFAbsoluteTimeGetCurrent() - renderStart) * 1000,
+                     (CFAbsoluteTimeGetCurrent() - drawStart) * 1000);
         update(vc, isnan(next) ? nil : [NSDate dateWithTimeIntervalSinceReferenceDate:next], YES);
     };
     void (^requestSnapshot)(void) = ^{
@@ -2940,24 +3028,28 @@ static void WPRuntimeLog(NSString *fmt, ...) {
         }
         WPReleaseCtx(ctx);
     };
-    uint64_t rid = WPRegisterRequest(entryType, entriesOffset, ^(NSArray<NSValue *> *entries) {
-        if (answered) return;
-        if (entries.count == 0) {
-            WPRuntimeLog(@"  %@: the timeline is empty, asking for a snapshot", kind);
-            requestSnapshot();
-            return;
-        }
-        answered = YES;
-        showEntries(entries, @"timeline");
-    });
     NSString *asyncMarker = [NSString stringWithFormat:@"async2-%@-%@", ext.extensionBundleID, kind];
+    uint64_t rid = WPRegisterRequest(entryType, entriesOffset, ^(NSArray<NSValue *> *entries) {
+        if (!answered) {
+            if (entries.count == 0) {
+                WPRuntimeLog(@"  %@: the timeline is empty, asking for a snapshot", kind);
+                requestSnapshot();
+            } else {
+                answered = YES;
+                showEntries(entries, @"timeline");
+            }
+        }
+        // The async call came back (and its entry was drawn) without a crash.
+        if (box.isAppIntent) WPMarkerEnd(asyncMarker);
+    });
     if (box.isAppIntent && WPMarkerTripped(asyncMarker)) {
         WPRuntimeLog(@"  %@: the async call crashed last time, keeping the placeholder", kind);
         update(nil, nil, YES);
         return;
     }
     if (box.isAppIntent) {
-        // timeline(for:in:) async, run in its own task.
+        // timeline(for:in:) async, run in its own task. The crash marker is removed when it
+        // comes back, or after 15 s if it never does (a call still waiting has not crashed).
         WPMarkerBegin(asyncMarker);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             WPMarkerEnd(asyncMarker);
@@ -2989,10 +3081,6 @@ static void WPRuntimeLog(NSString *fmt, ...) {
     });
 }
 
-+ (BOOL)isRenderBusy {
-    return NO;
-}
-
 static NSUncaughtExceptionHandler *gWPOldExceptionHandler;
 
 static void WPExceptionHandler(NSException *e) {
@@ -3009,6 +3097,9 @@ static void WPExceptionHandler(NSException *e) {
 
 // Logs where the main thread is when it has not answered for a few seconds.
 static void WPStartWatchdog(void) {
+    static BOOL started;
+    if (started) return;
+    started = YES;
     static mach_port_t mainThread;
     mainThread = mach_thread_self();
     static volatile double lastPong;
@@ -3095,6 +3186,10 @@ static void WPStartWatchdog(void) {
     return result;
 }
 
++ (void)startStallWatchdog {
+    dispatch_async(dispatch_get_main_queue(), ^{ WPStartWatchdog(); });
+}
+
 + (void)installRuntimeCrashLog {
     if (gWPRuntimeCrashLog) return;
     // Keep runtime.txt small: past 1 MB, the old log moves to runtime-old.txt.
@@ -3113,7 +3208,8 @@ static void WPStartWatchdog(void) {
     gWPRuntimeCrashLog = YES;
     gWPOldExceptionHandler = NSGetUncaughtExceptionHandler();
     NSSetUncaughtExceptionHandler(WPExceptionHandler);
-    WPStartWatchdog();
+    // The main-thread watchdog wakes SpringBoard every second: only for the diagnostic log.
+    if (WPDiagnosticLogEnabled()) WPStartWatchdog();
 }
 
 @end

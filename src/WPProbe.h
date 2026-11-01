@@ -33,13 +33,17 @@ NS_ASSUME_NONNULL_BEGIN
 // The same, only if the extension is already loaded (nothing is run for it here).
 + (nullable NSArray<NSDictionary *> *)loadedWidgetsForExtension:(WPWidgetExtension *)extension;
 // Draws the widget with the app's own view code. update is called on the main queue: first
-// with the placeholder (final = NO), then with the current timeline entry (final = YES; a nil
-// controller means keep what is shown). family: 0 small, 1 medium, 2 large.
+// with the placeholder (final = NO; only when placeholder is YES), then with the current
+// timeline entry (final = YES; a nil controller means keep what is shown).
+// family: 0 small, 1 medium, 2 large.
 + (void)renderWidgetKind:(NSString *)kind extension:(WPWidgetExtension *)extension family:(int)family size:(CGSize)size
+             placeholder:(BOOL)placeholder
                   update:(void (^)(UIViewController *_Nullable controller, NSDate *_Nullable nextRefresh, BOOL final))update;
 // Crash, exception and main-thread stall reports go to runtime.txt from now on (always,
 // whether or not the diagnostic log is on).
 + (void)installRuntimeCrashLog;
+// Reports where the main thread is when it stalls (started with the diagnostic log).
++ (void)startStallWatchdog;
 // Non-nil (a short description) when iOS would perform this widget's button intents in the
 // app's own process rather than the widget extension's.
 + (nullable NSString *)appProcessIntentsForExtension:(WPWidgetExtension *)extension;

@@ -88,6 +88,7 @@ static void WPApplySettings(void) {
     BOOL log = [values[@"DiagnosticLog"] boolValue];
     if (log != gWPDiagnosticLog) {
         gWPDiagnosticLog = log;
+        if (log) [WPProbe startStallWatchdog];
         NSLog(@"[WidgetProbe] diagnostic log %@", log ? @"on" : @"off");
     }
     double request = [values[@"ResetRequest"] doubleValue];

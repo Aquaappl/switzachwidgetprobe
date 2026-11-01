@@ -10,8 +10,9 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
 
 ## Features
 
-- **Widget gallery** — the home screen's **+** button › **Add Widget** lists every app with
-  widgets, with previews, names and descriptions, like the iOS gallery.
+- **Widget gallery** — the home screen's **+** button › **Add Widget** opens an iOS-style
+  gallery: one suggested widget per app, the list of apps with widgets, and search. An app's
+  page shows each of its widgets in each of its sizes, with names and descriptions.
 - **Sizes** — small, medium and large, as each widget declares (Lock Screen–only widgets are
   left out).
 - **Stacks** — widget stacks you swipe through, with page dots; the shown widget is remembered.
@@ -23,24 +24,26 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
   take taps within a 44 pt target, as on iOS.
 - **Links** — a widget's links open the app at the right place (`SwitzachWidgetLinks`, loaded
   into apps, hands the URL over).
+- **Translated texts** — texts the system looks up while drawing (SwiftUI `Text("key")`,
+  `String(localized:)`) are found in the widget's own strings.
 - **Crash guards** — if a widget's button, configuration or data loading crashes, that part is
   stopped instead of taking SpringBoard down again. If SpringBoard keeps crashing right after
   launch, widgets are not drawn for one launch so they can be removed.
 
 ## Requirements
 
-- Switzach (Nyxian) with tweak injection (MobileSubstrate / libinjector)
+- Switzach with ElleKit (tweak injection)
 - `preferenceloader` (installed automatically as a dependency)
-- Optional: TweakSettings, to open the settings page
+- TweakSettings, for the settings page (optional: the defaults need no setup)
 
 ## Install
 
-Install the `.deb` from the releases (or build it, below) with your package manager, then
+Build the `.deb` (below) and install it with your package manager (for example Sileo), then
 respring.
 
 ## Settings
 
-TweakSettings (or Settings) › **SwitzachWidgetProbe**:
+TweakSettings › **SwitzachWidgetProbe**:
 
 | Setting | Default | |
 | --- | --- | --- |
