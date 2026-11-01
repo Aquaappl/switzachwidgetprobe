@@ -279,6 +279,10 @@ reach SpringBoard, it also checks those files' dates every 5 s.
 - **Widgets are shown live.** SpringBoard shows the widget's own layers from the host; 2.0.0
   showed images the host took of them. What SwiftUI changes by itself now plays on the home
   screen: a timer counts down second by second (measured with a timer widget).
+- After a respring, widgets on a page that held only widgets ended up on another page (with
+  the app icons pushed to the next page): SpringBoardHome drops that page together with the
+  widgets while importing the layout, so the pages after it moved up. The page is now made
+  again before the widgets are put back.
 
 ## Changes in 2.0.0
 

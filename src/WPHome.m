@@ -936,6 +936,40 @@ static NSArray *WPWidgetsInState(id state) {
     return found;
 }
 
+// What became of each saved page in the import: SpringBoardHome drops our widgets, and a page
+// that held nothing else is dropped with them, so the pages after it move up one.
+typedef NS_ENUM(NSInteger, WPSavedPage) {
+    WPSavedPageKept,        // has an app or a folder: it is still there
+    WPSavedPageOursOnly,    // only widgets, ours among them: gone, to be put back
+    WPSavedPageGone,        // only other widgets: gone
+    WPSavedPageEmpty,       // nothing saved on it
+};
+
+static NSArray<NSNumber *> *WPSavedPages(id state) {
+    NSMutableArray *pages = [NSMutableArray array];
+    NSArray *lists = [state isKindOfClass:[NSDictionary class]] ? state[@"iconLists"] : nil;
+    if (![lists isKindOfClass:[NSArray class]]) return pages;
+    for (NSArray *items in lists) {
+        if (![items isKindOfClass:[NSArray class]] || items.count == 0) {
+            [pages addObject:@(WPSavedPageEmpty)];
+            continue;
+        }
+        BOOL kept = NO, ours = NO;
+        for (NSDictionary *d in items) {
+            NSArray *ws = [d isKindOfClass:[NSDictionary class]]
+                              ? (WPSavedStackElements(d) ?: ([d[@"elementType"] isEqual:@"widget"] && WPSavedWidget(d) ? @[ WPSavedWidget(d) ] : nil))
+                              : nil;
+            if (!ws) {
+                kept = YES;
+                break;
+            }
+            for (NSDictionary *w in ws) if (WPExtensionForID(w[@"ext"])) ours = YES;
+        }
+        [pages addObject:@(kept ? WPSavedPageKept : ours ? WPSavedPageOursOnly : WPSavedPageGone)];
+    }
+    return pages;
+}
+
 static NSUInteger WPCountOurWidgets(id model) {
     NSUInteger have = 0;
     id lists = WPMsg(WPMsg(model, @"rootFolder"), @"lists");
@@ -945,19 +979,42 @@ static NSUInteger WPCountOurWidgets(id model) {
     return have;
 }
 
-// Puts back the widgets SpringBoardHome dropped while importing the saved layout.
-static void WPRestoreWidgets(NSArray *pending) {
+// Puts back the widgets SpringBoardHome dropped while importing the saved layout, on the
+// pages they were saved on (pages that held only widgets are made again first).
+static void WPRestoreWidgets(NSArray *pending, NSArray<NSNumber *> *pages) {
     id model = gWPModel;
     if (!model || pending.count == 0) return;
     NSUInteger have = WPCountOurWidgets(model);
     if (have > 0) return; // kept by SpringBoardHome, or already put back
-    NSArray *lists = WPMsg(WPMsg(model, @"rootFolder"), @"lists");
+    id folder = WPMsg(model, @"rootFolder");
+    NSArray *lists = WPMsg(folder, @"lists");
     if (![lists isKindOfClass:[NSArray class]] || lists.count == 0) return;
+    // The saved page number → the page it is now.
+    NSMutableDictionary<NSNumber *, NSNumber *> *pageNow = [NSMutableDictionary dictionary];
+    NSUInteger now = 0, madeAgain = 0;
+    SEL insertList = NSSelectorFromString(@"insertEmptyListAtIndex:");
+    for (NSUInteger li = 0; li < pages.count; li++) {
+        WPSavedPage page = (WPSavedPage)pages[li].integerValue;
+        BOOL emptyNow = now < lists.count && [(NSArray *)WPMsg(lists[now], @"icons") count] == 0;
+        if (page == WPSavedPageKept) {
+            pageNow[@(li)] = @(now++);
+        } else if (page == WPSavedPageOursOnly) {
+            if (!emptyNow && now <= lists.count && [folder respondsToSelector:insertList]) {
+                ((id (*)(id, SEL, NSInteger))objc_msgSend)(folder, insertList, (NSInteger)now);
+                lists = WPMsg(folder, @"lists");
+                madeAgain++;
+            }
+            pageNow[@(li)] = @(now++);
+        } else if (page == WPSavedPageEmpty && emptyNow) {
+            now++;
+        }
+    }
     SEL insertSel = NSSelectorFromString(@"insertIcon:atIndex:");
     for (NSDictionary *r in pending) {
         id icon = WPMakeStackIcon(r[@"widgets"], WPGridClassForName(r[@"gridSize"]), r[@"selected"]);
         if (!icon) continue;
-        NSUInteger li = MIN([r[@"list"] unsignedIntegerValue], lists.count - 1);
+        NSNumber *at = pageNow[r[@"list"]];
+        NSUInteger li = MIN(at ? at.unsignedIntegerValue : [r[@"list"] unsignedIntegerValue], lists.count - 1);
         id list = lists[li];
         NSUInteger index = MIN([r[@"index"] unsignedIntegerValue], [WPMsg(list, @"icons") count]);
         if ([list respondsToSelector:insertSel]) {
@@ -966,7 +1023,7 @@ static void WPRestoreWidgets(NSArray *pending) {
             ((id (*)(id, SEL, id))objc_msgSend)(list, NSSelectorFromString(@"addIcon:"), icon);
         }
     }
-    WPHLog(@"Restored placement: %lu", (unsigned long)pending.count);
+    WPHLog(@"Restored placement: %lu (pages made again: %lu)", (unsigned long)pending.count, (unsigned long)madeAgain);
     SEL save = NSSelectorFromString(@"saveIconStateIfNeeded");
     if ([model respondsToSelector:save]) ((BOOL (*)(id, SEL))objc_msgSend)(model, save);
 }
@@ -974,6 +1031,7 @@ static void WPRestoreWidgets(NSArray *pending) {
 static void WPNoteLoadedState(id state) {
     NSArray *widgets = WPWidgetsInState(state);
     if (widgets.count == 0) return; // a later load without them is the copy SpringBoardHome cut down
+    NSArray *pages = WPSavedPages(state);
     // Their code can start loading now, while the home screen is still being built.
     if (!gWPGuardTripped) {
         for (NSDictionary *r in widgets) {
@@ -985,9 +1043,9 @@ static void WPNoteLoadedState(id state) {
     }
     // Put back right after this import, and look again a moment later in case SpringBoardHome
     // dropped them only afterwards.
-    dispatch_async(dispatch_get_main_queue(), ^{ WPRestoreWidgets(widgets); });
+    dispatch_async(dispatch_get_main_queue(), ^{ WPRestoreWidgets(widgets, pages); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        WPRestoreWidgets(widgets);
+        WPRestoreWidgets(widgets, pages);
     });
 }
 
