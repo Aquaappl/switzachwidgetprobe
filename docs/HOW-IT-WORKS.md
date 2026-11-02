@@ -38,6 +38,7 @@ Each app (SwitzachWidgetLinks.dylib): WPLinks.m receives widget links and hands 
 | Add widgets | Home screen **+** › **Add Widget** | An iOS-style gallery: one suggested widget per app with a live preview, the list of apps with widgets, search; an app's page shows all its widgets and sizes with names and descriptions |
 | Sizes | Pick small / medium / large in the gallery | Only the sizes the widget declares. Lock Screen–only widgets are not listed |
 | Stacks | Several widgets in one place | Swipe through, with page dots; the shown widget is remembered |
+| Long-press menu | Touch and hold a widget | The sizes the widget supports, Edit Home Screen, Remove Widget. Edit Widget is not offered yet |
 | Removal | The − badge in edit mode, or the long-press menu | The iOS confirmation ("Remove “…” Widget?") |
 | Automatic updates | Nothing to do | At the timeline's next date, when the app writes its shared data, and after a button |
 | Buttons | Tap a button in a widget | Actions that finish inside the widget run in place. Small buttons take taps within a 44 pt target |
@@ -210,8 +211,16 @@ edit mode and icons making room work as the ROM does them.
 - **Gallery** — "Add Widget" in the **+** menu opens an iOS-style sheet: one suggested widget
   per app at the top (only from apps whose host already listed its widgets, so opening the
   gallery starts no new host), the apps with widgets, and search. An app's page shows all its
-  widgets in each size; the previews are drawn by the hosts too. The chosen widget goes to the
-  top of the current page and pushes the other icons along.
+  widgets in each size; the previews are drawn by the hosts too. Suggestions are shown at the
+  widget's real size (smaller only when one does not fit) in centered rows that wrap, so an iPad
+  shows more of them side by side. The chosen widget goes to the top of the current page and
+  pushes the other icons along.
+- **Long-press menu** — SpringBoardHome gets a widget's menu items from chronod's widget host,
+  so ours got none and the menu did not open. They are composed with SpringBoardHome's own
+  `SBHIconApplicationShortcutListComposer` (sizes, Edit Home Screen, Remove Widget) and carried
+  out by the tweak: a size through the icon manager's resize, offering only the sizes the widget
+  declares; Edit Home Screen once the menu is gone, from the widget's icon view; Remove Widget
+  with the confirmation.
 - **Removal** — The ROM shows the − badge only for apps; it is turned on for widgets as well,
   with the iOS confirmation before the widget is removed. The long-press menu asks the same.
 - **After a respring** — The ROM writes widgets to `IconState.plist` but drops them again while
@@ -271,6 +280,15 @@ reach SpringBoard, it also checks those files' dates every 5 s.
 - `SwitzachWidgetHost.app/` — the signed copy of the host that runs.
 - `hosts-stderr.txt` — the hosts' own error output (with the diagnostic log on).
 - `*.running` / `*.bad` — crash markers.
+
+## Changes in 2.0.3
+
+- **Long-press menu for widgets.** Touching and holding a widget opened nothing (the ROM gets
+  a widget's items from chronod). The menu now has the items iOS shows: the sizes the widget
+  supports, Edit Home Screen and Remove Widget. Edit Widget is not offered yet.
+- **Gallery on iPad.** The suggestions were stretched to the sheet's width in two columns, so
+  on an iPad they were huge. They are now shown at the widget's real size in centered rows that
+  wrap.
 
 ## Changes in 2.0.2
 

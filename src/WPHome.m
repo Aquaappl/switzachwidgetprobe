@@ -1317,6 +1317,129 @@ static void hook_wantsUninstall(id self, SEL _cmd, id manager, id icon, id locat
     ((void (*)(id, SEL, id, id, id))orig_wantsUninstall)(self, _cmd, manager, icon, location);
 }
 
+#pragma mark - Long-press menu
+
+// A widget's entry in its host's list (kind, name, families…).
+static NSDictionary *WPWidgetInfo(id dataSource) {
+    WPWidgetExtension *ext = WPExtensionForID(WPExtIDOf(dataSource));
+    NSString *kind = WPMsg(dataSource, @"kind");
+    if (!ext || ![kind isKindOfClass:[NSString class]]) return nil;
+    for (NSDictionary *w in [WPRemote loadedWidgetsForExtension:ext] ?: @[]) {
+        if ([w[@"kind"] isEqual:kind]) return w;
+    }
+    return nil;
+}
+
+static IMP orig_itemsWithProposed;
+
+static id hook_itemsWithProposed(id self, SEL _cmd, id iconView, id proposed) {
+    // The ROM's home screen gets a widget's long-press items from chronod's widget host, so ours
+    // got none and the menu did not open. They are composed here the way SpringBoardHome does
+    // for widgets: size, Edit Home Screen, Remove Widget (editing a widget's settings is not
+    // offered yet).
+    id icon = WPMsg(iconView, @"icon");
+    if (WPIsOurWidgetIcon(icon) && [(NSArray *)proposed count] == 0) {
+        Class composer = NSClassFromString(@"SBHIconApplicationShortcutListComposer");
+        SEL compose = NSSelectorFromString(@"composedShortcutsForWidgetIcon:additionalApplicationShortcutItems:widgetIconSupportsConfiguration:iconManagerAllowsEditing:widgetSettings:");
+        if ([composer respondsToSelector:compose]) {
+            id settings = [self respondsToSelector:NSSelectorFromString(@"widgetSettings")] ? WPMsg(self, @"widgetSettings") : nil;
+            proposed = ((id (*)(id, SEL, id, id, BOOL, BOOL, id))objc_msgSend)(composer, compose, icon, @[], NO, YES, settings);
+        }
+    }
+    return ((id (*)(id, SEL, id, id))orig_itemsWithProposed)(self, _cmd, iconView, proposed);
+}
+
+static IMP orig_mgrShouldActivate;
+
+// The long-press items of our widgets. SpringBoardHome hands a widget's items to its widget
+// container (chronod's), which ours do not have, so the choice is carried out here; NO tells
+// SpringBoardHome it was handled (it would otherwise send it to an app).
+static BOOL WPHandleWidgetShortcut(id manager, UIView *iconView, NSString *type) {
+    id icon = WPMsg(iconView, @"icon");
+    NSString *prefix = @"com.apple.springboardhome.application-shortcut-item.";
+    if (![type hasPrefix:prefix]) return NO;
+    NSString *what = [type substringFromIndex:prefix.length];
+    if ([what isEqualToString:@"rearrange-icons"]) {
+        // As SpringBoardHome does: once the menu is gone (the icon view is back in its place, so
+        // its − badge goes on top of it), and from this icon view.
+        SEL fromIconView = NSSelectorFromString(@"setEditing:fromIconView:"), plain = NSSelectorFromString(@"setEditing:");
+        if (![manager respondsToSelector:fromIconView] && ![manager respondsToSelector:plain]) return NO;
+        __weak UIView *weakIconView = iconView;
+        void (^edit)(void) = ^{
+            if ([manager respondsToSelector:fromIconView]) ((void (*)(id, SEL, BOOL, id))objc_msgSend)(manager, fromIconView, YES, weakIconView);
+            else ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, plain, YES);
+        };
+        SEL afterMenu = NSSelectorFromString(@"performAfterIconContextMenuDismissesUsingBlock:");
+        if ([manager respondsToSelector:afterMenu]) ((void (*)(id, SEL, id))objc_msgSend)(manager, afterMenu, edit);
+        else edit();
+        return YES;
+    }
+    if ([what hasPrefix:@"change-widget-size-"]) {
+        NSString *size = [what substringFromIndex:@"change-widget-size-".length];
+        NSString *gridClass = [size isEqualToString:@"small"] ? WPGridSmall() : [size isEqualToString:@"medium"] ? WPGridMedium()
+                            : [size isEqualToString:@"large"] ? WPGridLarge() : nil;
+        SEL resize = NSSelectorFromString(@"iconView:wantsResizeToGridSizeClass:completionHandler:");
+        if (!gridClass || ![manager respondsToSelector:resize]) return NO;
+        void (^done)(void) = ^{
+            id model = WPMsg(manager, @"iconModel");
+            SEL save = NSSelectorFromString(@"saveIconStateIfNeeded");
+            if ([model respondsToSelector:save]) ((BOOL (*)(id, SEL))objc_msgSend)(model, save);
+        };
+        ((void (*)(id, SEL, id, id, id))objc_msgSend)(manager, resize, iconView, gridClass, done);
+        return YES;
+    }
+    if ([what isEqualToString:@"remove-widget"]) {
+        UIViewController *home = iconView.window.rootViewController;
+        if (!home) return NO;
+        WPConfirmRemoval(home, icon);
+        return YES;
+    }
+    return NO;
+}
+
+// The sizes a widget (every widget of a stack) supports, from the host's lists; nil while a
+// host has not listed its widgets yet.
+static id WPSupportedSizesOfIcon(id icon) {
+    NSMutableSet *common = nil;
+    for (id widget in WPIconWidgets(icon)) {
+        NSArray *families = WPWidgetInfo(widget)[@"families"];
+        if (![families isKindOfClass:[NSArray class]] || families.count == 0) return nil;
+        if (!common) common = [NSMutableSet setWithArray:families];
+        else [common intersectSet:[NSSet setWithArray:families]];
+    }
+    Class mutableClass = NSClassFromString(@"SBHMutableIconGridSizeClassSet");
+    SEL add = NSSelectorFromString(@"addGridSizeClass:");
+    if (!common || ![mutableClass instancesRespondToSelector:add]) return nil;
+    id set = [mutableClass new];
+    for (NSString *f in common) {
+        NSString *gridClass = [f isEqualToString:@"small"] ? WPGridSmall() : [f isEqualToString:@"medium"] ? WPGridMedium()
+                            : [f isEqualToString:@"large"] ? WPGridLarge() : nil;
+        if (gridClass) ((void (*)(id, SEL, id))objc_msgSend)(set, add, gridClass);
+    }
+    return set;
+}
+
+// The sizes offered by the long-press menu: only those the widget supports (a medium-only
+// widget offers none). Placement still accepts every size (WPWidgetGridSet).
+static IMP orig_resizeSizes;
+
+static id hook_resizeSizes(id self, SEL _cmd, id iconView) {
+    id icon = WPMsg(iconView, @"icon");
+    id sizes = WPIsOurWidgetIcon(icon) ? WPSupportedSizesOfIcon(icon) : nil;
+    return sizes ?: ((id (*)(id, SEL, id))orig_resizeSizes)(self, _cmd, iconView);
+}
+
+static BOOL hook_mgrShouldActivate(id self, SEL _cmd, id iconView, id item, NSUInteger index) {
+    BOOL ours = WPIsOurWidgetIcon(WPMsg(iconView, @"icon"));
+    NSString *type = WPMsg(item, @"type");
+    if (ours && [type isKindOfClass:[NSString class]] && WPHandleWidgetShortcut(self, iconView, type)) {
+        WPHLog(@"Menu: %@ handled", type);
+        return NO;
+    }
+    return ((BOOL (*)(id, SEL, id, id, NSUInteger))orig_mgrShouldActivate)(self, _cmd, iconView, item, index);
+}
+
+
 static BOOL WPHook(NSString *className, NSString *selName, IMP replacement, IMP *orig) {
     Class cls = NSClassFromString(className);
     SEL sel = NSSelectorFromString(selName);
@@ -1347,6 +1470,9 @@ void WPHomeInstall(void) {
         [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
     }];
     WPHook(@"SBHIconManager", @"customImageViewControllerForIconView:", (IMP)hook_customImageVC, &orig_customImageVC);
+    WPHook(@"SBHIconManager", @"iconView:applicationShortcutItemsWithProposedItems:", (IMP)hook_itemsWithProposed, &orig_itemsWithProposed);
+    WPHook(@"SBHIconManager", @"iconView:shouldActivateApplicationShortcutItem:atIndex:", (IMP)hook_mgrShouldActivate, &orig_mgrShouldActivate);
+    WPHook(@"SBHIconManager", @"supportedIconGridSizeClassesForResizeOfIconView:", (IMP)hook_resizeSizes, &orig_resizeSizes);
     WPHook(@"SBHIconManager", @"isWidgetValid:iconSizeClass:", (IMP)hook_isWidgetValid, &orig_isWidgetValid);
     WPHook(@"SBHIconManager", @"validatedWidgetIconForWidgetIcon:", (IMP)hook_validatedIcon, &orig_validatedIcon);
     WPHook(@"SBHIconManager", @"iconModel:validatedWidgetIconForWidgetIcon:", (IMP)hook_modelValidatedIcon, &orig_modelValidatedIcon);
@@ -1920,20 +2046,30 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
     }
     UIView *container = [UIView new];
     CGFloat width = self.view.bounds.size.width > 10 ? self.view.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
-    CGFloat inset = 20, gap = 14, y = 8;
-    CGFloat column = (width - inset * 2 - gap) / 2;
-    NSInteger col = 0;
+    // Each preview at the widget's real size (smaller only when it does not fit), in rows that
+    // wrap and are centered: two small ones beside a larger one on an iPhone, more on an iPad.
+    CGFloat inset = 20, gap = 14;
+    __block CGFloat y = 8;
+    CGFloat available = width - inset * 2;
+    NSMutableArray<UIView *> *row = [NSMutableArray array];
+    __block CGFloat rowWidth = 0, rowHeight = 0;
+    void (^finishRow)(void) = ^{
+        CGFloat x = inset + (available - rowWidth) / 2;
+        for (UIView *tile in row) {
+            tile.frame = CGRectMake(x, y, tile.bounds.size.width, tile.bounds.size.height);
+            x += tile.bounds.size.width + gap;
+        }
+        if (row.count) y += rowHeight + 6;
+        [row removeAllObjects];
+        rowWidth = rowHeight = 0;
+    };
     for (NSUInteger i = 0; i < items.count; i++) {
         NSDictionary *it = items[i];
-        BOOL small = [it[@"gridClass"] isEqualToString:WPGridSmall()];
-        if (!small && col == 1) { y += column + 46; col = 0; }
         SBIconImageInfo info = WPImageInfoForGridClass(self.home, it[@"gridClass"]);
-        CGFloat w = small ? column : width - inset * 2;
-        CGFloat scale = w / MAX(info.size.width, 1);
-        CGFloat h = info.size.height * scale;
-        CGFloat x = small ? inset + col * (column + gap) : inset;
+        CGFloat scale = MIN(1, available / MAX(info.size.width, 1));
+        CGFloat w = info.size.width * scale, h = info.size.height * scale;
         UIButton *tile = [UIButton buttonWithType:UIButtonTypeCustom];
-        tile.frame = CGRectMake(x, y, w, h + 40);
+        tile.bounds = CGRectMake(0, 0, w, h + 40);
         tile.tag = (NSInteger)i;
         [tile addTarget:self action:@selector(openSuggestion:) forControlEvents:UIControlEventTouchUpInside];
         WPHomeWidgetViewController *preview = WPMakePreview(it[@"ext"], it[@"widget"][@"kind"], it[@"gridClass"], info);
@@ -1958,14 +2094,12 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
         [tile addSubview:app];
         [tile addSubview:sub];
         [container addSubview:tile];
-        if (small && col == 0) {
-            col = 1;
-        } else {
-            y += h + 46;
-            col = 0;
-        }
+        if (row.count && rowWidth + gap + w > available) finishRow();
+        rowWidth += (row.count ? gap : 0) + w;
+        rowHeight = MAX(rowHeight, h + 40);
+        [row addObject:tile];
     }
-    if (col == 1) y += column + 46;
+    finishRow();
     container.frame = CGRectMake(0, 0, width, items.count ? y : 0);
     _suggestionsView = container;
     _table.tableHeaderView = items.count ? container : nil;
