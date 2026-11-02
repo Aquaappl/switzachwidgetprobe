@@ -1,6 +1,6 @@
 Package: com.rinapple.switzachwidgetprobe
 Name: SwitzachWidgetProbe
-Version: 1.0.3
+Version: 1.0.3+nightly1
 Architecture: iphoneos-arm64e
 Description: Home screen widgets for sideloaded apps on Switzach
  Puts the widgets of sideloaded apps on the Switzach home screen, the way iOS

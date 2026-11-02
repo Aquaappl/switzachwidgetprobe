@@ -16,6 +16,8 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
 - **Sizes** — small, medium and large, as each widget declares (Lock Screen–only widgets are
   left out).
 - **Stacks** — widget stacks you swipe through, with page dots; the shown widget is remembered.
+- **Long-press menu** — as on iOS: the sizes the widget supports, Edit Home Screen, and Remove
+  Widget. (Edit Widget, for widgets with settings, is not offered yet.)
 - **Removal** — the − badge in edit mode, or the long-press menu, with the iOS confirmation.
 - **Live updates** — widgets refresh on their timeline and when the app changes its shared data.
 - **Interactive widgets** — buttons run the app's intent. Actions that iOS performs
