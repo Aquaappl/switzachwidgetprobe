@@ -35,9 +35,11 @@ NS_ASSUME_NONNULL_BEGIN
 // Draws the widget with the app's own view code. update is called on the main queue: first
 // with the placeholder (final = NO; only when placeholder is YES), then with the current
 // timeline entry (final = YES; a nil controller means keep what is shown).
-// family: 0 small, 1 medium, 2 large.
+// family: 0 small, 1 medium, 2 large. accented: WidgetKit's accented rendering mode (clear or
+// tinted icons on the home screen): the widget's container background is left out.
 + (void)renderWidgetKind:(NSString *)kind extension:(WPWidgetExtension *)extension family:(int)family size:(CGSize)size
              placeholder:(BOOL)placeholder
+                accented:(BOOL)accented
                   update:(void (^)(UIViewController *_Nullable controller, NSDate *_Nullable nextRefresh, BOOL final))update;
 // Crash, exception and main-thread stall reports go to runtime.txt from now on (always,
 // whether or not the diagnostic log is on).

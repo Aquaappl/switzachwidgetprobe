@@ -38,6 +38,7 @@ Each app (SwitzachWidgetLinks.dylib): WPLinks.m receives widget links and hands 
 | Add widgets | Home screen **+** › **Add Widget** | An iOS-style gallery: one suggested widget per app with a live preview, the list of apps with widgets, search; an app's page shows all its widgets and sizes with names and descriptions |
 | Sizes | Pick small / medium / large in the gallery | Only the sizes the widget declares. Lock Screen–only widgets are not listed |
 | Stacks | Several widgets in one place | Swipe through, with page dots; the shown widget is remembered |
+| Clear and tinted icons | The ROM's appearance settings | Glass behind the widget, WidgetKit's accented mode without the app's background; tinted icons color the widget in their tint. Follows a change at once |
 | Long-press menu | Touch and hold a widget | The sizes the widget supports, Edit Home Screen, Remove Widget. Edit Widget is not offered yet |
 | Removal | The − badge in edit mode, or the long-press menu | The iOS confirmation ("Remove “…” Widget?") |
 | Automatic updates | Nothing to do | At the timeline's next date, when the app writes its shared data, and after a button |
@@ -60,6 +61,7 @@ Where iOS relies on a system service that Switzach does not have, the feature ca
 | Editing a widget's configuration | No configuration UI yet | Configurable widgets use their default configuration |
 | Widgets that need the app's live process or a system service Switzach lacks | The widget host is a plain process, not an iOS extension process with its system connections | The widget may stay on its placeholder |
 | Push updates from a server; `WidgetCenter.reloadTimelines` from the app as such | Switzach has no chronod | Changes to the app's shared data are watched instead, which has nearly the same effect |
+| Nyxian's filesystem sandbox (“Filesystem Sandbox” in its recovery settings) | With it on, a process SpringBoard starts gets no file access of its own, so the widget host can read neither the app's extension nor its data | A widget says to turn it off; the gallery says so where it finds no widgets |
 | An updated app's extension, right away | The extension runs from a signed copy | The new build is copied again on the next respring |
 
 ## 0. Processes
@@ -215,6 +217,17 @@ edit mode and icons making room work as the ROM does them.
   widget's real size (smaller only when one does not fit) in centered rows that wrap, so an iPad
   shows more of them side by side. The chosen widget goes to the top of the current page and
   pushes the other icons along.
+- **Clear and tinted icons** — The style is read from SpringBoardHome
+  (`iconImageStyleConfiguration`: clear or tinted, light / dark / automatic, the tint), and a
+  change is noticed after `_updateIconStyleConfiguration:oldStyleConfiguration:` and from the
+  icon tint and light / dark traits. SpringBoard puts UIKit's glass (`UIGlassEffect`; clear glass,
+  darkened in the dark variant, or glass in the tint) behind the widget, one for a whole stack.
+  The host draws the widget without its container background and gives its view WidgetKit's
+  accented rendering mode (`\.widgetRenderingMode`, and `\.showsWidgetContainerBackground` =
+  false) through `_UIHostingView.environmentOverride`, so apps that adapt to it show their own
+  look for it. For tinted icons a color matrix on the host's layer draws the widget in the tint,
+  from its brightness (a new tint needs no new drawing). If setting the environment ever crashes
+  a host, it stays off for that app (crash marker).
 - **Long-press menu** — SpringBoardHome gets a widget's menu items from chronod's widget host,
   so ours got none and the menu did not open. They are composed with SpringBoardHome's own
   `SBHIconApplicationShortcutListComposer` (sizes, Edit Home Screen, Remove Widget) and carried
@@ -280,6 +293,16 @@ reach SpringBoard, it also checks those files' dates every 5 s.
 - `SwitzachWidgetHost.app/` — the signed copy of the host that runs.
 - `hosts-stderr.txt` — the hosts' own error output (with the diagnostic log on).
 - `*.running` / `*.bad` — crash markers.
+
+## Changes in 2.0.4
+
+- **Clear and tinted icons.** With the home screen's icons set to clear or tinted, widgets were
+  drawn in full color on their own background. They are now shown on glass and drawn in
+  WidgetKit's accented mode without the app's background, as iOS does, and for tinted icons in
+  the tint. Changing the style, light / dark or the tint updates them at once.
+- With Nyxian's filesystem sandbox on, the widget hosts cannot reach their files and widgets
+  stayed empty without a word. A widget now says to turn off “Filesystem Sandbox” in Nyxian's
+  recovery settings, and so does the gallery where it finds no widgets.
 
 ## Changes in 2.0.3
 

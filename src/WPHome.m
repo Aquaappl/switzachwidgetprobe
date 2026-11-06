@@ -179,6 +179,139 @@ static id WPWidgetGridSet(void) {
 
 static __weak id gWPManager; // SBHIconManager
 
+#pragma mark - Icon style (clear / tinted icons)
+
+// The home screen's icon style as SpringBoardHome holds it (set by the ROM's appearance settings
+// through SpringBoardHome's style picker). With clear or tinted icons, iOS shows widgets on
+// glass and draws them in WidgetKit's accented rendering mode.
+typedef NS_ENUM(NSInteger, WPIconStyle) { WPIconStyleColor, WPIconStyleClear, WPIconStyleTinted };
+
+static WPIconStyle WPCurrentIconStyle(void) {
+    id cfg = WPMsg(gWPManager, @"iconImageStyleConfiguration");
+    Class tinted = NSClassFromString(@"SBHTintedIconImageStyleConfiguration");
+    Class clear = NSClassFromString(@"SBHClearIconImageStyleConfiguration");
+    if (tinted && [cfg isKindOfClass:tinted]) return WPIconStyleTinted;
+    if (clear && [cfg isKindOfClass:clear]) return WPIconStyleClear;
+    return WPIconStyleColor;
+}
+
+// Light or dark glass, as the style asks (its "light" / "dark" variant); unspecified for
+// "automatic" (the screen's).
+static UIUserInterfaceStyle WPGlassInterfaceStyle(void) {
+    id cfg = WPMsg(gWPManager, @"iconImageStyleConfiguration");
+    SEL sel = NSSelectorFromString(@"iconGlassUserInterfaceStyle");
+    if (![cfg respondsToSelector:sel]) return UIUserInterfaceStyleUnspecified;
+    NSInteger v = ((NSInteger (*)(id, SEL))objc_msgSend)(cfg, sel);
+    return v == UIUserInterfaceStyleLight || v == UIUserInterfaceStyleDark ? (UIUserInterfaceStyle)v : UIUserInterfaceStyleUnspecified;
+}
+
+// The tint of tinted icons (nil for the other styles).
+static UIColor *WPIconTintColor(void) {
+    if (WPCurrentIconStyle() != WPIconStyleTinted) return nil;
+    id color = WPMsg(WPMsg(gWPManager, @"iconImageStyleConfiguration"), @"tintColor");
+    return [color isKindOfClass:[UIColor class]] ? color : nil;
+}
+
+// Everything the widget's look depends on, to tell when it changed.
+static NSString *WPIconAppearanceKey(void) {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    [WPIconTintColor() getRed:&r green:&g blue:&b alpha:&a];
+    return [NSString stringWithFormat:@"%ld|%ld|%.3f,%.3f,%.3f", (long)WPCurrentIconStyle(), (long)WPGlassInterfaceStyle(), r, g, b];
+}
+
+// The glass behind a widget: a view at the bottom of `view` for clear and tinted icons
+// (UIKit's glass where there is one, else a thin material), removed for colored ones. Clear
+// icons get clear glass, darkened in the dark variant; tinted icons get glass in their tint.
+static UIVisualEffectView *WPUpdateGlass(UIView *view, UIVisualEffectView *glass, WPIconStyle style, CGFloat cornerRadius) {
+    static char keyTag;
+    if (style == WPIconStyleColor) {
+        [glass removeFromSuperview];
+        return nil;
+    }
+    UIUserInterfaceStyle uis = WPGlassInterfaceStyle();
+    BOOL dark = uis == UIUserInterfaceStyleDark || (uis == UIUserInterfaceStyleUnspecified && view.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    NSString *key = [NSString stringWithFormat:@"%@|%d", WPIconAppearanceKey(), dark];
+    if (!glass) {
+        glass = [[UIVisualEffectView alloc] initWithEffect:nil];
+        glass.userInteractionEnabled = NO;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve = kCACornerCurveContinuous;
+        glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    }
+    if (![objc_getAssociatedObject(glass, &keyTag) isEqual:key]) {
+        objc_setAssociatedObject(glass, &keyTag, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        Class glassClass = NSClassFromString(@"UIGlassEffect");
+        SEL withStyle = NSSelectorFromString(@"effectWithStyle:");
+        UIVisualEffect *effect = nil;
+        // UIGlassEffectStyle: 0 regular, 1 clear.
+        if ([glassClass respondsToSelector:withStyle]) effect = ((id (*)(id, SEL, NSInteger))objc_msgSend)(glassClass, withStyle, style == WPIconStyleClear ? 1 : 0);
+        UIColor *tint = nil;
+        if (style == WPIconStyleTinted) {
+            UIColor *color = WPIconTintColor() ?: UIColor.grayColor;
+            CGFloat r = 0.5, g = 0.5, b = 0.5, a = 1;
+            [color getRed:&r green:&g blue:&b alpha:&a];
+            CGFloat k = dark ? 0.35 : 1; // darker tint for the dark variant
+            tint = [UIColor colorWithRed:r * k green:g * k blue:b * k alpha:dark ? 0.55 : 0.3];
+        } else if (dark) {
+            tint = [UIColor colorWithWhite:0 alpha:0.4];
+        }
+        if (tint && [effect respondsToSelector:NSSelectorFromString(@"setTintColor:")]) [effect setValue:tint forKey:@"tintColor"];
+        if (!effect) effect = [UIBlurEffect effectWithStyle:dark ? UIBlurEffectStyleSystemUltraThinMaterialDark : UIBlurEffectStyleSystemUltraThinMaterialLight];
+        glass.effect = effect;
+        glass.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+    }
+    glass.frame = view.bounds;
+    glass.layer.cornerRadius = cornerRadius;
+    if (glass.superview != view || view.subviews.firstObject != glass) [view insertSubview:glass atIndex:0];
+    return glass;
+}
+
+// SpringBoardHome's icon style changed (the ROM's appearance settings, also while a tint is
+// being picked): posted after SpringBoardHome has applied it
+// (-[SBHIconManager _updateIconStyleConfiguration:oldStyleConfiguration:]).
+static NSString *const WPIconStyleChangedNotification = @"WPIconStyleChanged";
+static IMP orig_updateIconStyleConfiguration;
+
+static void WPPostIconStyleChanged(void) {
+    static BOOL pending;
+    if (pending) return;
+    pending = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        pending = NO;
+        [[NSNotificationCenter defaultCenter] postNotificationName:WPIconStyleChangedNotification object:nil];
+    });
+}
+
+static void hook_updateIconStyleConfiguration(id self, SEL _cmd, id configuration, id old) {
+    ((void (*)(id, SEL, id, id))orig_updateIconStyleConfiguration)(self, _cmd, configuration, old);
+    WPPostIconStyleChanged();
+}
+
+// Calls `action` on the controller when the icon style or light / dark changes (the ROM's
+// appearance settings change SpringBoardHome's icon tint trait).
+static void WPObserveIconStyle(UIViewController *vc, SEL action) {
+    [[NSNotificationCenter defaultCenter] addObserver:vc selector:action name:WPIconStyleChangedNotification object:nil];
+    SEL registerSel = NSSelectorFromString(@"registerForTraitChanges:withAction:");
+    if (![vc respondsToSelector:registerSel]) return;
+    for (NSString *name in @[ @"UITraitUserInterfaceStyle", @"SBHTraitIconTint" ]) {
+        Class trait = NSClassFromString(name);
+        if (!trait) continue;
+        @try {
+            ((id (*)(id, SEL, id, SEL))objc_msgSend)(vc, registerSel, @[ trait ], action);
+        } @catch (NSException *e) {
+            WPHLog(@"Icon style: cannot observe %@ (%@)", name, e.reason);
+        }
+    }
+}
+
+// With Nyxian's filesystem sandbox on, a process SpringBoard starts gets no file access of its
+// own: the widget hosts cannot read the apps' widgets. Shown on a widget whose host says so, and
+// where the gallery finds no widgets although apps with widgets are installed.
+static NSString *const WPFilesystemSandboxMessage =
+    @"Widgets cannot load: turn off \u201cFilesystem Sandbox\u201d in Nyxian\u2019s recovery settings";
+static NSString *const WPFilesystemSandboxHint =
+    @"If apps with widgets are installed, turn off \u201cFilesystem Sandbox\u201d in Nyxian\u2019s recovery settings.";
+
 static BOOL WPIsEditing(void) {
     id m = gWPManager;
     SEL sel = NSSelectorFromString(@"isEditing");
@@ -301,6 +434,7 @@ static void hook_appOpenURL(id self, SEL _cmd, NSURL *url, NSDictionary *options
 // or the app opens.
 - (void)tapAtPoint:(CGPoint)pointInSelf;
 - (void)setIconImageInfo:(SBIconImageInfo)info;
+- (void)updateIconStyle; // glass and rendering mode for the current icon style
 @end
 
 // SpringBoardHome calls methods of SBIconViewCustomImageViewControlling (and, for widget
@@ -362,6 +496,10 @@ static void WPForwardAsZero(NSInvocation *invocation) {
     CALayer *_hostLayer;    // CALayerHost showing the host's context
     BOOL _drawn;
     CFAbsoluteTime _lastTap;
+    BOOL _renderedAccented;
+    NSArray *_renderedTint;
+    NSString *_shownAppearance;
+    UIVisualEffectView *_glass;
 }
 
 - (void)dealloc {
@@ -431,13 +569,36 @@ static void WPForwardAsZero(NSInvocation *invocation) {
     _status.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     _status.textAlignment = NSTextAlignmentCenter;
     _status.numberOfLines = 0;
+    _status.adjustsFontSizeToFitWidth = YES;
+    _status.minimumScaleFactor = 0.7;
     _status.text = gWPGuardTripped ? @"Drawing is stopped\nafter repeated crashes" : @"Loading…";
     [v addSubview:_status];
     self.view = v;
 }
 
+// Glass for clear or tinted icons. In a stack the stack shows it (behind all its pages).
+- (void)updateIconStyle {
+    if (!self.isViewLoaded) return;
+    WPIconStyle style = WPCurrentIconStyle();
+    BOOL inStack = [self.parentViewController isKindOfClass:NSClassFromString(@"WPHomeStackViewController")];
+    self.view.backgroundColor = style == WPIconStyleColor ? [UIColor colorWithWhite:0.15 alpha:1] : UIColor.clearColor;
+    CGFloat radius = _info.continuousCornerRadius > 0 ? _info.continuousCornerRadius : 22;
+    _glass = WPUpdateGlass(self.view, _glass, inStack ? WPIconStyleColor : style, radius);
+    if (inStack && style != WPIconStyleColor) self.view.backgroundColor = UIColor.clearColor;
+    NSString *appearance = WPIconAppearanceKey();
+    if (![appearance isEqualToString:_shownAppearance]) {
+        _shownAppearance = appearance;
+        [self scheduleRender];
+    }
+}
+
+- (void)iconStyleMayHaveChanged {
+    [self updateIconStyle];
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    [self updateIconStyle];
     _status.frame = CGRectInset(self.view.bounds, 8, 8);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -449,6 +610,9 @@ static void WPForwardAsZero(NSInvocation *invocation) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    WPObserveIconStyle(self, @selector(iconStyleMayHaveChanged));
+    _shownAppearance = WPIconAppearanceKey();
+    [self updateIconStyle];
     [self scheduleRender];
 }
 
@@ -475,8 +639,21 @@ static void WPForwardAsZero(NSInvocation *invocation) {
     if (size.width < 10) return;
     int family = WPFamilyForGridClass(self.gridSizeClass);
     BOOL dark = self.traitCollection.userInterfaceStyle != UIUserInterfaceStyleLight;
+    WPIconStyle iconStyle = WPCurrentIconStyle();
+    BOOL accented = iconStyle != WPIconStyleColor;
+    // On glass the widget's own light / dark follows the glass: the style's variant for clear
+    // icons; light content for tinted ones (it is tinted from its brightness).
+    if (iconStyle == WPIconStyleTinted) {
+        dark = YES;
+    } else if (iconStyle == WPIconStyleClear && WPGlassInterfaceStyle() != UIUserInterfaceStyleUnspecified) {
+        dark = WPGlassInterfaceStyle() == UIUserInterfaceStyleDark;
+    }
+    NSArray *tint = nil;
+    UIColor *tintColor = WPIconTintColor();
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if ([tintColor getRed:&r green:&g blue:&b alpha:&a]) tint = @[ @(r), @(g), @(b) ];
     if (_viewID && fabs(size.width - _renderedSize.width) <= 4 && fabs(size.height - _renderedSize.height) <= 4 && family == _renderedFamily &&
-        dark == _renderedDark) return;
+        dark == _renderedDark && accented == _renderedAccented && (tint == _renderedTint || [tint isEqualToArray:_renderedTint])) return;
     if (![WPRemote loadedWidgetsForExtension:self.extension]) {
         // The host loads the app's code first (in its own process).
         __weak typeof(self) weakSelf = self;
@@ -490,8 +667,11 @@ static void WPForwardAsZero(NSInvocation *invocation) {
     _renderedSize = size;
     _renderedFamily = family;
     _renderedDark = dark;
+    _renderedAccented = accented;
+    _renderedTint = tint;
     __weak typeof(self) weakSelf = self;
-    [WPRemote showView:_viewID extension:self.extension kind:self.kind family:family size:size dark:dark events:^(NSDictionary *m) {
+    [WPRemote showView:_viewID extension:self.extension kind:self.kind family:family size:size dark:dark accented:accented tint:tint
+                events:^(NSDictionary *m) {
         [weakSelf hostEvent:m];
     }];
 }
@@ -514,7 +694,10 @@ static void WPForwardAsZero(NSInvocation *invocation) {
         _status.hidden = YES;
     } else if ([op isEqualToString:@"failed"]) {
         WPHLog(@"%@ could not be drawn: %@", self.kind, m[@"reason"]);
-        if (!_drawn) {
+        if ([m[@"reason"] isEqual:@"filesystem-sandbox"]) {
+            _status.hidden = NO;
+            _status.text = WPFilesystemSandboxMessage;
+        } else if (!_drawn) {
             _status.hidden = NO;
             _status.text = @"Could not draw";
         }
@@ -593,6 +776,7 @@ static void WPIconObserve(id icon, id observer, BOOL add) {
     NSArray<UIView *> *_dots;
     NSArray<NSString *> *_keys;
     NSArray<UIViewController *> *_pages;
+    UIVisualEffectView *_glass; // behind all pages, for clear or tinted icons
     NSMutableDictionary<NSString *, UIViewController *> *_pagesByKey;
     NSUInteger _activeIndex;
     BOOL _settingActive;
@@ -706,7 +890,18 @@ static void WPIconObserve(id icon, id observer, BOOL add) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    WPObserveIconStyle(self, @selector(updateIconStyle));
     [self rebuildFlashing:NO];
+}
+
+- (void)updateIconStyle {
+    if (!self.isViewLoaded) return;
+    WPIconStyle style = WPCurrentIconStyle();
+    _clip.backgroundColor = style == WPIconStyleColor ? [UIColor colorWithWhite:0.15 alpha:1] : UIColor.clearColor;
+    _glass = WPUpdateGlass(_clip, _glass, style, _info.continuousCornerRadius > 0 ? _info.continuousCornerRadius : 22);
+    for (UIViewController *page in _pages) {
+        if ([page isKindOfClass:[WPHomeWidgetViewController class]]) [(WPHomeWidgetViewController *)page updateIconStyle];
+    }
 }
 
 - (void)viewDidLayoutSubviews {
@@ -725,6 +920,7 @@ static void WPIconObserve(id icon, id observer, BOOL add) {
 - (void)layoutPages {
     CGRect b = self.view.bounds;
     _clip.frame = b;
+    [self updateIconStyle];
     _scroll.frame = _clip.bounds;
     CGFloat h = b.size.height;
     for (NSUInteger i = 0; i < _pages.count; i++) _pages[i].view.frame = CGRectMake(0, i * h, b.size.width, h);
@@ -1470,6 +1666,8 @@ void WPHomeInstall(void) {
         [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
     }];
     WPHook(@"SBHIconManager", @"customImageViewControllerForIconView:", (IMP)hook_customImageVC, &orig_customImageVC);
+    WPHook(@"SBHIconManager", @"_updateIconStyleConfiguration:oldStyleConfiguration:", (IMP)hook_updateIconStyleConfiguration,
+           &orig_updateIconStyleConfiguration);
     WPHook(@"SBHIconManager", @"iconView:applicationShortcutItemsWithProposedItems:", (IMP)hook_itemsWithProposed, &orig_itemsWithProposed);
     WPHook(@"SBHIconManager", @"iconView:shouldActivateApplicationShortcutItem:atIndex:", (IMP)hook_mgrShouldActivate, &orig_mgrShouldActivate);
     WPHook(@"SBHIconManager", @"supportedIconGridSizeClassesForResizeOfIconView:", (IMP)hook_resizeSizes, &orig_resizeSizes);
@@ -2142,7 +2340,8 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     cell.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
     if (_shownApps.count == 0) {
-        cell.textLabel.text = _search.text.length ? @"No Results" : @"No apps with widgets";
+        cell.textLabel.text = _search.text.length ? @"No Results" : [@"No apps with widgets\n\n" stringByAppendingString:WPFilesystemSandboxHint];
+        cell.textLabel.numberOfLines = 0;
         cell.textLabel.textColor = UIColor.secondaryLabelColor;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         return cell;
@@ -2185,7 +2384,7 @@ static WPHomeWidgetViewController *WPMakePreview(WPWidgetExtension *ext, NSStrin
 - (void)openApp:(WPWidgetExtension *)ext widgets:(NSArray *)allWidgets startKind:(NSString *)kind {
     NSArray *widgets = WPHomeScreenWidgets(allWidgets);
     if (widgets.count == 0) {
-        NSString *message = allWidgets.count ? @"This app's widgets are for the Lock Screen and cannot be placed on the Home Screen." : @"No widgets were found";
+        NSString *message = allWidgets.count ? @"This app's widgets are for the Lock Screen and cannot be placed on the Home Screen." : [@"No widgets were found.\n\n" stringByAppendingString:WPFilesystemSandboxHint];
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:ext.appName message:message
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];

@@ -17,6 +17,9 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
 - **Sizes** — small, medium and large, as each widget declares (Lock Screen–only widgets are
   left out).
 - **Stacks** — widget stacks you swipe through, with page dots; the shown widget is remembered.
+- **Clear and tinted icons** — with the home screen's icons set to clear or tinted (the ROM's
+  appearance settings), widgets are shown on glass and drawn in WidgetKit's accented mode, in
+  the tint for tinted icons. They follow a change at once.
 - **Long-press menu** — as on iOS: the sizes the widget supports, Edit Home Screen, and Remove
   Widget. (Edit Widget, for widgets with settings, is not offered yet.)
 - **Removal** — the − badge in edit mode, or the long-press menu, with the iOS confirmation.
@@ -38,6 +41,8 @@ How it works, and what it can and cannot do in detail: [docs/HOW-IT-WORKS.md](do
 - Switzach with ElleKit (tweak injection)
 - `preferenceloader` (installed automatically as a dependency)
 - TweakSettings, for the settings page (optional: the defaults need no setup)
+- Nyxian's “Filesystem Sandbox” (recovery settings) off: with it on, the widget hosts cannot
+  read the apps' widgets (a widget says so, and the gallery where it finds none)
 
 ## Install
 

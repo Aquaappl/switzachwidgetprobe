@@ -13,13 +13,18 @@
 // Requests (stdin)                                     Answers / events (stdout)
 //   {"op":"list"}                                        {"op":"widgets","list":[…]}
 //   {"op":"show","view":n,"kind":…,"family":0-2,          {"op":"context","view":n,"id":…}
-//    "w":…,"h":…,"style":"dark"|"light"}                  {"op":"drawn","view":n}
+//    "w":…,"h":…,"style":"dark"|"light",                  {"op":"drawn","view":n}
+//    "mode":"fullColor"|"accented",
+//    "tint":[r,g,b]}   (tinted icons: drawn in that color)
 //                                                         {"op":"failed","view":n,"reason":…}
 //   {"op":"tap","view":n,"x":…,"y":…}                    {"op":"tapped","view":n,"result":
 //                                                           "button"|"link"|"none"|"app",…}
 //                                                         {"op":"open","url":…}  (a link)
 //   {"op":"hide","view":n}
 //   {"op":"log","on":true|false}
+//                                                       {"op":"ready","pid":…,"blocked":true|false}
+//   (blocked: this process cannot reach its files — Nyxian's filesystem sandbox is on; every
+//    show then fails with the reason "filesystem-sandbox")
 //
 //   SwitzachWidgetHost <extension id> <app id> <app name> <app path> <extension path>
 //                      <executable> <data container or "">
@@ -39,6 +44,7 @@ static BOOL gWPHostLog;
 BOOL WPDiagnosticLogEnabled(void) { return gWPHostLog; }
 
 static WPWidgetExtension *gExt;
+static BOOL gWPBlocked; // the host cannot reach its files (Nyxian's filesystem sandbox)
 
 #pragma mark - Talking to SpringBoard
 
@@ -78,6 +84,8 @@ static void WPHostLog(NSString *fmt, ...) {
 @property (nonatomic) int family;
 @property (nonatomic) CGSize size;
 @property (nonatomic) UIUserInterfaceStyle style;
+@property (nonatomic) BOOL accented;           // WidgetKit's accented rendering mode
+@property (nonatomic, copy) NSArray *tint;      // [r, g, b]: drawn in this color
 @property (nonatomic, strong) id context;      // CAContext (remote)
 @property (nonatomic, strong) CALayer *root;   // its layer: holds the container's layer
 @property (nonatomic, strong) UIWindow *window; // where SwiftUI draws
@@ -96,6 +104,7 @@ static void WPHostLog(NSString *fmt, ...) {
 static NSMutableDictionary<NSNumber *, WPHostedView *> *gViews;
 
 static void WPRender(WPHostedView *v, BOOL placeholder);
+static void WPApplyTint(WPHostedView *v);
 
 static NSUInteger WPCountLayers(CALayer *layer) {
     NSUInteger n = 0;
@@ -184,6 +193,7 @@ static void WPRender(WPHostedView *v, BOOL placeholder) {
     __weak WPHostedView *weakView = v;
     @try {
         [WPProbe renderWidgetKind:v.kind extension:gExt family:v.family size:v.size placeholder:(placeholder || !v.drawnOnce)
+                         accented:v.accented
                            update:^(UIViewController *vc, NSDate *next, BOOL final) {
             WPHostedView *strong = weakView;
             if (!strong || !gViews[@(strong.viewID)]) return;
@@ -224,6 +234,10 @@ static void WPShow(NSDictionary *m) {
     NSNumber *viewID = m[@"view"];
     NSString *kind = m[@"kind"];
     if (![viewID isKindOfClass:[NSNumber class]] || ![kind isKindOfClass:[NSString class]]) return;
+    if (gWPBlocked) {
+        WPSend(@{ @"op" : @"failed", @"view" : viewID, @"reason" : @"filesystem-sandbox" });
+        return;
+    }
     CGSize size = CGSizeMake([m[@"w"] doubleValue], [m[@"h"] doubleValue]);
     if (size.width < 1 || size.height < 1) return;
     WPHostedView *v = gViews[viewID];
@@ -255,6 +269,14 @@ static void WPShow(NSDictionary *m) {
     UIUserInterfaceStyle style = [m[@"style"] isEqual:@"light"] ? UIUserInterfaceStyleLight : UIUserInterfaceStyleDark;
     BOOL restyled = !fresh && style != v.style;
     v.style = style;
+    BOOL accented = [m[@"mode"] isEqual:@"accented"];
+    BOOL remoded = !fresh && accented != v.accented;
+    v.accented = accented;
+    NSArray *tint = [m[@"tint"] isKindOfClass:[NSArray class]] && [m[@"tint"] count] == 3 ? m[@"tint"] : nil;
+    if (fresh || !(tint == v.tint || [tint isEqualToArray:v.tint])) {
+        v.tint = tint;
+        WPApplyTint(v);
+    }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     v.root.frame = CGRectMake(0, 0, size.width, size.height);
@@ -266,11 +288,41 @@ static void WPShow(NSDictionary *m) {
     if (changed) {
         if (!fresh) v.drawnOnce = NO; // a new size starts from its placeholder
         WPRender(v, YES);
+    } else if (remoded) {
+        WPRender(v, NO); // drawn again in the other mode; the current drawing stays until then
+        if (restyled && v.shown) v.window.overrideUserInterfaceStyle = style;
     } else if (restyled && v.shown) {
         v.window.overrideUserInterfaceStyle = style;
     } else if (v.drawnOnce) {
         WPSend(@{ @"op" : @"drawn", @"view" : viewID, @"final" : @YES });
     }
+}
+
+// Tinted icons: the widget is drawn in their tint, from its brightness (white becomes a light
+// tint, black stays black, transparency stays). A color matrix filter on the context's root
+// layer, so a new tint needs no new drawing.
+typedef struct { float m11, m12, m13, m14, m15, m21, m22, m23, m24, m25, m31, m32, m33, m34, m35, m41, m42, m43, m44, m45; } CAColorMatrix;
+
+static void WPApplyTint(WPHostedView *v) {
+    NSArray *filters = nil;
+    if (v.tint.count == 3) {
+        id filter = ((id (*)(id, SEL, id))objc_msgSend)(NSClassFromString(@"CAFilter"), NSSelectorFromString(@"filterWithType:"), @"colorMatrix");
+        if (filter) {
+            float t[3];
+            for (int i = 0; i < 3; i++) t[i] = 0.35f + 0.65f * MIN(1.f, MAX(0.f, [v.tint[i] floatValue])); // a lighter tint
+            const float lr = 0.2126f, lg = 0.7152f, lb = 0.0722f;
+            CAColorMatrix m = { lr * t[0], lg * t[0], lb * t[0], 0, 0,
+                                lr * t[1], lg * t[1], lb * t[1], 0, 0,
+                                lr * t[2], lg * t[2], lb * t[2], 0, 0,
+                                0, 0, 0, 1, 0 };
+            [filter setValue:[NSValue value:&m withObjCType:@encode(CAColorMatrix)] forKey:@"inputColorMatrix"];
+            filters = @[ filter ];
+        }
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    v.root.filters = filters;
+    [CATransaction commit];
 }
 
 static void WPHide(NSDictionary *m) {
@@ -530,9 +582,15 @@ int main(int argc, char *argv[]) {
         // Commit what SwiftUI changes (no UIApplication run loop does it here).
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { [CATransaction flush]; }];
 
+        // With Nyxian's filesystem sandbox on, a process SpringBoard starts gets no file access of
+        // its own: it can read neither the app's extension nor its caches.
+        gWPBlocked = access([WPProbe workDirectory].fileSystemRepresentation, W_OK) != 0 ||
+                     access(gExt.extensionPath.fileSystemRepresentation, R_OK) != 0;
+        if (gWPBlocked) WPHostLog(@"cannot reach its files (Nyxian's filesystem sandbox is on)");
+
         WPReadRequests();
         WPCheckIdle();
-        WPSend(@{ @"op" : @"ready", @"pid" : @(getpid()) });
+        WPSend(@{ @"op" : @"ready", @"pid" : @(getpid()), @"blocked" : @(gWPBlocked) });
         CFRunLoopRun();
     }
     return 0;

@@ -18,10 +18,13 @@ NS_ASSUME_NONNULL_BEGIN
 // A view is one widget drawn by the host into a context of its own. events receives the host's
 // messages for it: {"op":"context","id":…} (show it with a CALayerHost), {"op":"drawn"},
 // {"op":"failed","reason":…}, and {"op":"lost"} when the host ended (it is started again and
-// the view drawn again by itself).
+// the view drawn again by itself). accented: the home screen's icons are clear or tinted, so
+// the widget is drawn as iOS draws it then (WidgetKit's accented rendering mode, without its
+// container background). tint: [r, g, b] (0–1) for tinted icons: the widget is drawn in that
+// color, from its brightness.
 + (NSInteger)newViewID;
 + (void)showView:(NSInteger)viewID extension:(WPWidgetExtension *)extension kind:(NSString *)kind family:(int)family size:(CGSize)size
-            dark:(BOOL)dark events:(void (^)(NSDictionary *message))events;
+            dark:(BOOL)dark accented:(BOOL)accented tint:(nullable NSArray<NSNumber *> *)tint events:(void (^)(NSDictionary *message))events;
 + (void)hideView:(NSInteger)viewID extension:(WPWidgetExtension *)extension;
 // A tap in the view's points. result: "button" or "link" (the widget took it), "none" (no
 // control there), "app" (an action iOS performs inside the app), or "failed" (no answer).

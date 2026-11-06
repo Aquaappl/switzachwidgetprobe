@@ -2665,13 +2665,168 @@ static void *WPWithContainerBackground(void *view, const void *viewType, const v
     return result;
 }
 
-// Calls the stored "(Entry) -> Content" view builder; Content may be AnyView or the app's own view type.
-static UIViewController *WPRenderEntryGeneric(const void *generatorClosure, const void *generatorType, const void *entry) {
+#pragma mark The accented rendering mode
+
+// When the home screen's icons are clear or tinted, iOS draws widgets in WidgetKit's accented
+// rendering mode, without their container background (SpringBoard draws the glass behind them):
+// a widget reads \.widgetRenderingMode and \.showsWidgetContainerBackground to adapt. Those
+// environment values are given to the widget's view through _UIHostingView.environmentOverride
+// (values set there take precedence over the ones the hosting view derives itself), built with
+// WidgetKit's own setters. EnvironmentValues and WidgetRenderingMode are resilient structs:
+// they are passed and returned indirectly.
+
+typedef void (*WPIndirectGetter)(void *out __attribute__((swift_indirect_result)), const void *selfValue __attribute__((swift_context))) SWIFTCALL;
+typedef void (*WPIndirectSetter)(void *newValue, void *selfValue __attribute__((swift_context))) SWIFTCALL;
+typedef void (*WPStaticIndirectGetter)(void *out __attribute__((swift_indirect_result))) SWIFTCALL;
+typedef void (*WPKeySubscriptSetter)(void *newValue, const void *keyMetatype, const void *keyType, const void *keyWT,
+                                     void *selfValue __attribute__((swift_context))) SWIFTCALL;
+typedef WPMetadataResponse (*WPGenericAccessor1)(size_t request, const void *arg) SWIFTCALL;
+typedef unsigned (*WPGetEnumTagSinglePayload)(const void *value, unsigned emptyCases, const void *type);
+typedef void (*WPStoreEnumTagSinglePayload)(void *value, unsigned whichCase, unsigned emptyCases, const void *type);
+typedef void *(*WPInitializeWithTake)(void *dest, void *src, const void *type);
+typedef void (*WPDestroyValue)(void *value, const void *type);
+typedef struct { uint64_t a, b; } WPSwiftStringPair;
+typedef WPSwiftStringPair (*WPDescriptionGetter)(const void *selfValue __attribute__((swift_context))) SWIFTCALL;
+
+typedef struct {
+    WPIndirectInit environmentInit;
+    const void *environmentType, *optionalType, *modeType, *backgroundKeyType, *backgroundKeyWT;
+    WPIndirectGetter overrideGet, modeGet;
+    WPIndirectSetter overrideSet, modeSet;
+    WPStaticIndirectGetter accented;
+    WPKeySubscriptSetter keySet;
+    WPDescriptionGetter modeDescription;
+} WPEnvironmentCalls;
+
+static const WPEnvironmentCalls *WPEnvironment(void) {
+    static WPEnvironmentCalls calls;
+    static const WPEnvironmentCalls *result;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        calls.environmentInit = (WPIndirectInit)dlsym(RTLD_DEFAULT, "$s7SwiftUI17EnvironmentValuesVACycfC");
+        WPMetadataAccessor environmentAccessor = (WPMetadataAccessor)dlsym(RTLD_DEFAULT, "$s7SwiftUI17EnvironmentValuesVMa");
+        WPGenericAccessor1 optionalAccessor = (WPGenericAccessor1)dlsym(RTLD_DEFAULT, "$sSqMa");
+        calls.overrideGet = (WPIndirectGetter)dlsym(RTLD_DEFAULT, "$s7SwiftUI14_UIHostingViewC19environmentOverrideAA17EnvironmentValuesVSgvg");
+        calls.overrideSet = (WPIndirectSetter)dlsym(RTLD_DEFAULT, "$s7SwiftUI14_UIHostingViewC19environmentOverrideAA17EnvironmentValuesVSgvs");
+        calls.modeGet = (WPIndirectGetter)dlsym(RTLD_DEFAULT, "$s7SwiftUI17EnvironmentValuesV9WidgetKitE19widgetRenderingModeAD0ehI0Vvg");
+        calls.modeSet = (WPIndirectSetter)dlsym(RTLD_DEFAULT, "$s7SwiftUI17EnvironmentValuesV9WidgetKitE19widgetRenderingModeAD0ehI0Vvs");
+        WPMetadataAccessor modeAccessor = (WPMetadataAccessor)dlsym(RTLD_DEFAULT, "$s9WidgetKit0A13RenderingModeVMa");
+        calls.accented = (WPStaticIndirectGetter)dlsym(RTLD_DEFAULT, "$s9WidgetKit0A13RenderingModeV8accentedACvgZ");
+        calls.modeDescription = (WPDescriptionGetter)dlsym(RTLD_DEFAULT, "$s9WidgetKit0A13RenderingModeV11descriptionSSvg");
+        calls.keySet = (WPKeySubscriptSetter)dlsym(RTLD_DEFAULT, "$s7SwiftUI17EnvironmentValuesVy5ValueQzxmcAA0C3KeyRzluis");
+        WPMetadataAccessor keyAccessor = (WPMetadataAccessor)dlsym(RTLD_DEFAULT, "$s7SwiftUI17EnvironmentValuesV9WidgetKitE05ShowsE13BackgroundKeyVMa");
+        const void *keyProto = dlsym(RTLD_DEFAULT, "$s7SwiftUI14EnvironmentKeyMp");
+        WPConformsToProtocol conformsTo = (WPConformsToProtocol)dlsym(RTLD_DEFAULT, "swift_conformsToProtocol");
+        NSString *problem = nil;
+        if (!calls.environmentInit || !environmentAccessor || !optionalAccessor || !calls.overrideGet || !calls.overrideSet) {
+            problem = @"_UIHostingView.environmentOverride not found";
+        } else if (!calls.modeGet || !calls.modeSet || !modeAccessor || !calls.accented || !calls.modeDescription) {
+            problem = @"EnvironmentValues.widgetRenderingMode not found";
+        } else {
+            calls.environmentType = environmentAccessor(0).metadata;
+            calls.optionalType = calls.environmentType ? optionalAccessor(0, calls.environmentType).metadata : NULL;
+            calls.modeType = modeAccessor(0).metadata;
+            if (!calls.environmentType || !calls.optionalType || !calls.modeType) problem = @"a type's metadata not found";
+            // Optional: \.showsWidgetContainerBackground = false (only read by the widget).
+            calls.backgroundKeyType = keyAccessor ? keyAccessor(0).metadata : NULL;
+            calls.backgroundKeyWT = calls.backgroundKeyType && keyProto && conformsTo ? conformsTo(calls.backgroundKeyType, keyProto) : NULL;
+        }
+        if (problem) {
+            WPRuntimeLog(@"  accented rendering mode: not available (%@)", problem);
+        } else {
+            WPRuntimeLog(@"  accented rendering mode: available%@", calls.keySet && calls.backgroundKeyWT ? @"" : @" (without showsWidgetContainerBackground)");
+            result = &calls;
+        }
+    });
+    return result;
+}
+
+static NSString *WPRenderingModeName(const WPEnvironmentCalls *c, const void *mode) {
+    WPSwiftStringPair s = c->modeDescription(mode);
+    return WPSwiftString(&s) ?: @"?";
+}
+
+// Gives the hosting controller's view the accented rendering mode. NO (logged once) when it
+// cannot; the widget is then drawn in full color. A crash here turns it off for this extension
+// (its own marker: several hosts run at once, and another host's marker in progress is not a
+// crash of this one).
+static BOOL WPApplyAccentedMode(UIViewController *controller) {
+    static NSString *marker;
+    if (!marker) marker = [@"accented-" stringByAppendingString:gWPCurrentExtension.extensionBundleID ?: @"host"];
+    static BOOL failed;
+    if (failed || WPMarkerTripped(marker)) return NO;
+    const WPEnvironmentCalls *c = WPEnvironment();
+    UIView *view = controller.view;
+    BOOL hostingView = NO;
+    for (Class k = view.class; k && !hostingView; k = class_getSuperclass(k)) hostingView = [NSStringFromClass(k) hasPrefix:@"_TtGC7SwiftUI14_UIHostingView"];
+    if (!c || !hostingView) {
+        if (!failed && c) WPRuntimeLog(@"  accented rendering mode: the controller's view is a %@", NSStringFromClass(view.class));
+        failed = YES;
+        return NO;
+    }
+    const WPValueWitnessTable *envVWT = WPVWT(c->environmentType);
+    const WPValueWitnessTable *optVWT = WPVWT(c->optionalType);
+    WPMarkerBegin(marker);
+    // The current override: none is expected. Read first, into a buffer filled with a pattern,
+    // to check the calls are made the way the functions take them (an indirect result).
+    void *current = WPAllocValue(c->optionalType);
+    memset(current, 0xA5, optVWT->stride);
+    c->overrideGet(current, (__bridge void *)view);
+    unsigned currentTag = ((WPGetEnumTagSinglePayload)envVWT->functions[6])(current, 1, c->environmentType);
+    BOOL untouched = YES;
+    for (size_t i = 0; i < optVWT->size; i++) if (((uint8_t *)current)[i] != 0xA5) untouched = NO;
+    if (untouched || currentTag > 1) {
+        WPMarkerEnd(marker);
+        WPRuntimeLog(@"  accented rendering mode: unexpected environment override (tag %u%@)", currentTag, untouched ? @", not written" : @"");
+        failed = YES;
+        free(current);
+        return NO;
+    }
+    if (currentTag == 0) ((WPDestroyValue)optVWT->functions[1])(current, c->optionalType);
+    free(current);
+
+    void *environment = WPAllocValue(c->environmentType);
+    c->environmentInit(environment);
+    void *mode = WPAllocValue(c->modeType);
+    c->accented(mode);
+    c->modeSet(mode, environment); // takes the value
+    free(mode);
+    if (c->keySet && c->backgroundKeyWT) {
+        bool shows = false;
+        c->keySet(&shows, c->backgroundKeyType, c->backgroundKeyType, c->backgroundKeyWT, environment);
+    }
+    static BOOL logged;
+    if (!logged) {
+        logged = YES;
+        void *readBack = WPAllocValue(c->modeType);
+        c->modeGet(readBack, environment);
+        WPRuntimeLog(@"  accented rendering mode: widgetRenderingMode = %@", WPRenderingModeName(c, readBack));
+        ((WPDestroyValue)WPVWT(c->modeType)->functions[1])(readBack, c->modeType);
+        free(readBack);
+    }
+    void *override = WPAllocValue(c->optionalType);
+    ((WPInitializeWithTake)envVWT->functions[4])(override, environment, c->environmentType);
+    ((WPStoreEnumTagSinglePayload)envVWT->functions[7])(override, 0, 1, c->environmentType);
+    free(environment);
+    c->overrideSet(override, (__bridge void *)view); // takes the value
+    free(override);
+    WPMarkerEnd(marker);
+    return YES;
+}
+
+// Calls the stored "(Entry) -> Content" view builder; Content may be AnyView or the app's own
+// view type. In the accented mode the container background is left out (as iOS does).
+static UIViewController *WPRenderEntryGeneric(const void *generatorClosure, const void *generatorType, const void *entry, BOOL accented) {
     const void *resultType = ((const void *const *)generatorType)[2];
     void *view = WPAllocValue(resultType);
     if (!view) return nil;
     const void *const *pair = generatorClosure;
     ((WPContentFn)pair[0])(view, entry, pair[1]);
+    if (accented) {
+        UIViewController *controller = WPHostView(view, resultType);
+        if (controller) WPApplyAccentedMode(controller);
+        return controller;
+    }
     const void *backgroundType = NULL;
     void *withBackground = WPWithContainerBackground(view, resultType, &backgroundType);
     if (withBackground) return WPHostView(withBackground, backgroundType);
@@ -2947,6 +3102,7 @@ static void WPRuntimeLog(NSString *fmt, ...) {
 
 + (void)renderWidgetKind:(NSString *)kind extension:(WPWidgetExtension *)ext family:(int)family size:(CGSize)size
              placeholder:(BOOL)wantPlaceholder
+                accented:(BOOL)accented
                   update:(void (^)(UIViewController *controller, NSDate *nextRefresh, BOOL final))update {
     NSArray *widgets = [self widgetsForExtension:ext];
     const WPProviderBox *found = NULL;
@@ -3019,7 +3175,7 @@ static void WPRuntimeLog(NSString *fmt, ...) {
     if (wantPlaceholder) {
         void *placeholder = WPAllocValue(entryType);
         ((WPPlaceholderFn)placeholderFn)(placeholder, context, providerType, wt, provider);
-        UIViewController *first = WPRenderEntryGeneric(generator, generatorType, placeholder);
+        UIViewController *first = WPRenderEntryGeneric(generator, generatorType, placeholder, accented);
         WPLOG(log, @"  placeholder → %@ in %.0f ms (view type %@)", first ? @"drawn" : @"failed",
               (CFAbsoluteTimeGetCurrent() - renderStart) * 1000, WPTypeName(((const void *const *)generatorType)[2]));
         gWPLogPath = savedPath;
@@ -3047,7 +3203,7 @@ static void WPRuntimeLog(NSString *fmt, ...) {
         WPRuntimeLog(@"  %@ %@: %lu entries%@", kind, source, (unsigned long)entries.count,
                      isnan(next) ? @"" : [NSString stringWithFormat:@" (next change in %.0f s)", next - now]);
         CFAbsoluteTime drawStart = CFAbsoluteTimeGetCurrent();
-        UIViewController *vc = current ? WPRenderEntryGeneric(generator, generatorType, current) : nil;
+        UIViewController *vc = current ? WPRenderEntryGeneric(generator, generatorType, current, accented) : nil;
         WPRuntimeLog(@"  %@ drawn: %.0f ms after the request (view %.0f ms)", kind, (CFAbsoluteTimeGetCurrent() - renderStart) * 1000,
                      (CFAbsoluteTimeGetCurrent() - drawStart) * 1000);
         update(vc, isnan(next) ? nil : [NSDate dateWithTimeIntervalSinceReferenceDate:next], YES);

@@ -241,7 +241,9 @@ static NSString *WPHostExecutable(void) {
 - (void)handle:(NSDictionary *)m {
     NSString *op = m[@"op"];
     NSNumber *viewID = [m[@"view"] isKindOfClass:[NSNumber class]] ? m[@"view"] : nil;
-    if ([op isEqualToString:@"widgets"]) {
+    if ([op isEqualToString:@"ready"]) {
+        if ([m[@"blocked"] boolValue]) WPRLog(@"Widget host for %@ cannot reach its files: Nyxian's filesystem sandbox is on", self.extension.appName);
+    } else if ([op isEqualToString:@"widgets"]) {
         self.widgets = [m[@"list"] isKindOfClass:[NSArray class]] ? m[@"list"] : @[];
         WPRLog(@"Widget host for %@: %lu widget(s)", self.extension.appName, (unsigned long)self.widgets.count);
         NSArray *waiters = [self.listWaiters copy];
@@ -363,15 +365,17 @@ static WPRemoteHost *WPHostFor(WPWidgetExtension *ext) {
 }
 
 + (void)showView:(NSInteger)viewID extension:(WPWidgetExtension *)extension kind:(NSString *)kind family:(int)family size:(CGSize)size
-            dark:(BOOL)dark events:(void (^)(NSDictionary *))events {
+            dark:(BOOL)dark accented:(BOOL)accented tint:(NSArray<NSNumber *> *)tint events:(void (^)(NSDictionary *))events {
     WPRemoteHost *h = WPHostFor(extension);
     if (!h) return;
     if (h.disabled) {
         events(@{ @"op" : @"failed", @"reason" : @"the widget keeps crashing" });
         return;
     }
-    NSDictionary *show = @{ @"op" : @"show", @"view" : @(viewID), @"kind" : kind, @"family" : @(family), @"w" : @(size.width),
-                            @"h" : @(size.height), @"style" : dark ? @"dark" : @"light" };
+    NSMutableDictionary *show = [@{ @"op" : @"show", @"view" : @(viewID), @"kind" : kind, @"family" : @(family), @"w" : @(size.width),
+                                    @"h" : @(size.height), @"style" : dark ? @"dark" : @"light",
+                                    @"mode" : accented ? @"accented" : @"fullColor" } mutableCopy];
+    if (tint.count == 3) show[@"tint"] = tint;
     h.shows[@(viewID)] = show;
     h.viewEvents[@(viewID)] = [events copy];
     BOOL wasRunning = h.running;
