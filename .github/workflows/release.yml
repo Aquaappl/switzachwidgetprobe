@@ -1,6 +1,6 @@
 # Publishes a release of the branch it is run on, by hand.
 #
-# Actions › Release › Run workflow, and pick the branch (v1.x or v2.x). The version is that
+# Actions › Release › Run workflow, and pick the branch (v1.x, v2.x or v3.x). The version is that
 # branch's "Version:" line in layout/DEBIAN/control. The package is built and released as
 # v<version> with the .deb attached as SwitzachWidgetProbe.deb, unless that release already
 # exists. The release is marked latest only when its version is the highest released, so

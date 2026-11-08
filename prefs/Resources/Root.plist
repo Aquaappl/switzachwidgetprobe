@@ -10,9 +10,25 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>Widgets</string>
+			<key>footerText</key>
+			<string>Starts every widget's process again and draws the widgets anew: for a widget that stopped updating or shows an error.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>Restart Widgets</string>
+			<key>action</key>
+			<string>restartWidgets:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>Safety</string>
 			<key>footerText</key>
-			<string>When a widget's button, configuration or data loading crashes, SwitzachWidgetProbe stops running that part so the home screen keeps working. Reset to try those parts again.</string>
+			<string>When part of a widget (its data loading, its settings, its rendering) crashes, SwitzachWidgetProbe stops running that part for that app, and stops a widget whose process keeps crashing. Reset to try them again.</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -49,7 +65,8 @@
 			<string>PSGroupCell</string>
 			<key>footerText</key>
 			<string>SwitzachWidgetProbe @VERSION@
-Add widgets from the home screen's + button.</string>
+
+Add widgets with the home screen's + button. Touch and hold a widget to change its size, edit it or its stack, or remove it.</string>
 		</dict>
 	</array>
 </dict>

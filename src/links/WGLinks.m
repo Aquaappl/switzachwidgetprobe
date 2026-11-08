@@ -1,5 +1,5 @@
 // SwitzachWidgetLinks
-// The app side of widget links. On iOS, a Link inside a widget opens its app with the URL
+// The app side of widget links (unchanged in behaviour since 2.x). On iOS, a Link inside a widget opens its app with the URL
 // (for example youtube://feed/subscriptions). The ROM (Nyxian) can only open an app, not hand
 // it a URL, so SwitzachWidgetProbe in SpringBoard leaves the URL for the app and opens it;
 // this library, loaded into apps, picks the URL up when the app comes to the front and gives
@@ -34,7 +34,7 @@ static NSURL *WLPendingURL(NSMutableArray<NSString *> *files) {
         [files addObject:path];
         double at = [d[@"time"] doubleValue];
         NSString *app = d[@"app"];
-        if ([app isKindOfClass:[NSString class]] && ![app isEqualToString:NSBundle.mainBundle.bundleIdentifier]) continue;
+        if (![app isKindOfClass:[NSString class]] || ![app isEqualToString:NSBundle.mainBundle.bundleIdentifier]) continue;
         if (CFAbsoluteTimeGetCurrent() - at > 45 || at <= newest) continue;
         NSURL *url = [d[@"url"] isKindOfClass:[NSString class]] ? [NSURL URLWithString:d[@"url"]] : nil;
         if (url) {
