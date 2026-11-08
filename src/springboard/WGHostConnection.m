@@ -97,6 +97,11 @@ static NSString *WGHostExecutable(void) {
 }
 
 static NSMutableDictionary<NSString *, WGHost *> *gHosts;
+static int gSandboxState = -1; // Nyxian's filesystem sandbox, as the last host to start found it
+
+int WGFilesystemSandboxState(void) {
+    return gSandboxState;
+}
 
 + (instancetype)hostForExtension:(WGExtension *)extension {
     if (!gHosts) gHosts = [NSMutableDictionary dictionary];
@@ -263,10 +268,18 @@ static NSMutableDictionary<NSString *, WGHost *> *gHosts;
     NSNumber *viewID = [m[WGView] isKindOfClass:[NSNumber class]] ? m[WGView] : nil;
     if ([op isEqual:@"ready"]) {
         self.blocked = [m[@"blocked"] boolValue];
+        if (gSandboxState != self.blocked) {
+            gSandboxState = self.blocked;
+            [[NSNotificationCenter defaultCenter] postNotificationName:WGFilesystemSandboxChangedNotification object:nil];
+        }
         if (self.blocked) WGLogImportant(@"Widget host for %@ cannot reach its files: Nyxian's filesystem sandbox is on", self.extension.appName);
     } else if ([op isEqual:@"widgets"]) {
         self.widgets = [m[@"list"] isKindOfClass:[NSArray class]] ? m[@"list"] : @[];
-        if ([m[@"problem"] isEqual:@"filesystem-sandbox"]) self.blocked = YES;
+        if ([m[@"problem"] isEqual:@"filesystem-sandbox"] && !self.blocked) {
+            self.blocked = YES;
+            gSandboxState = 1;
+            [[NSNotificationCenter defaultCenter] postNotificationName:WGFilesystemSandboxChangedNotification object:nil];
+        }
         WGLog(@"Widget host for %@: %lu widget(s)%@", self.extension.appName, (unsigned long)self.widgets.count,
               m[@"problem"] ? [@", " stringByAppendingString:m[@"problem"]] : @"");
         [self finishListWaiters];

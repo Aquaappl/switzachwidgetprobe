@@ -31,8 +31,12 @@ NSNotificationName const WGAppearanceDidChangeNotification = @"WGAppearanceDidCh
 static const CGFloat kWGClearContentOpacity = 0.92;
 static const CGFloat kWGTintLightening = 0.35;  // 0: the tint itself, 1: white
 // Glass: a shade over clear glass (light / dark variant), and the tint over tinted glass.
+// Tinted glass matches the bodies of the ROM's tinted icons, which are the tint darkened (to
+// about a third of it with light icons and a sixth with dark ones, measured on screenshots), in
+// both variants over dark glass.
 static const CGFloat kWGClearShadeLight = 0.08, kWGClearShadeDark = 0.40;
-static const CGFloat kWGTintAlphaLight = 0.45, kWGTintAlphaDark = 0.60, kWGTintDarkening = 0.35;
+static const CGFloat kWGTintAlphaLight = 0.80, kWGTintAlphaDark = 0.85;
+static const CGFloat kWGTintDarkeningLight = 0.35, kWGTintDarkeningDark = 0.20;
 
 #pragma mark - Reading the style
 
@@ -284,12 +288,14 @@ void WGAppearanceObserve(UIViewController *vc, SEL action) {
     if ([key isEqualToString:_key]) return;
     _key = key;
     BOOL dark = appearance.darkGlass;
+    BOOL darkStyle = dark;
     UIColor *tint;
     if (appearance.mode == WGIconModeTinted) {
         CGFloat r = 0.5, g = 0.5, b = 0.5, a = 1;
         [appearance.tint getRed:&r green:&g blue:&b alpha:&a];
-        CGFloat k = dark ? kWGTintDarkening : 1;
+        CGFloat k = dark ? kWGTintDarkeningDark : kWGTintDarkeningLight;
         tint = [UIColor colorWithRed:r * k green:g * k blue:b * k alpha:dark ? kWGTintAlphaDark : kWGTintAlphaLight];
+        darkStyle = YES;
     } else {
         tint = [UIColor colorWithWhite:0 alpha:dark ? kWGClearShadeDark : kWGClearShadeLight];
     }
@@ -306,7 +312,7 @@ void WGAppearanceObserve(UIViewController *vc, SEL action) {
         [self addSubview:_effect];
     }
     _effect.effect = effect;
-    _effect.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+    _effect.overrideUserInterfaceStyle = darkStyle ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
     [self setNeedsLayout];
 }
 

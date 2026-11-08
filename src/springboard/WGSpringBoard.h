@@ -146,6 +146,10 @@ FOUNDATION_EXPORT WGIconImageInfo WGImageInfoForFamily(WGFamily family);
 
 FOUNDATION_EXPORT NSString *const WGFilesystemSandboxMessage;
 FOUNDATION_EXPORT NSString *const WGFilesystemSandboxHint;
+// Nyxian's filesystem sandbox (it keeps the widget hosts from the apps' files): 1 on, 0 off,
+// -1 not known yet (no widget host has started). Changes are posted (main thread).
+FOUNDATION_EXPORT int WGFilesystemSandboxState(void);
+FOUNDATION_EXPORT NSNotificationName const WGFilesystemSandboxChangedNotification;
 
 @interface WGWidgetViewController : UIViewController
 - (instancetype)initWithExtension:(WGExtension *)extension kind:(NSString *)kind family:(WGFamily)family;

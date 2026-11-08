@@ -336,6 +336,44 @@ static void WGAlert(UIViewController *on, NSString *title, NSString *message) {
     // Apps installed since the last look show up a moment later.
     __weak typeof(self) weakSelf = self;
     [WGExtensions refresh:^{ [weakSelf reloadApps]; }];
+    // Whether Nyxian's filesystem sandbox keeps widgets from loading: a widget host knows (it
+    // cannot reach the apps' files). If none has started yet, the first app's host is asked.
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(sandboxChanged) name:WGFilesystemSandboxChangedNotification object:nil];
+    if (WGFilesystemSandboxState() < 0 && _apps.count) [[WGHost hostForExtension:_apps.firstObject] loadWidgets:^{ [weakSelf sandboxChanged]; }];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)sandboxChanged {
+    [_table reloadData];
+}
+
+// A first section with the warning while the filesystem sandbox is on.
+- (BOOL)showsSandboxWarning {
+    return WGFilesystemSandboxState() == 1;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return [self showsSandboxWarning] ? 2 : 1;
+}
+
+- (UITableViewCell *)sandboxWarningCell {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    UIListContentConfiguration *c = [UIListContentConfiguration subtitleCellConfiguration];
+    c.text = @"Filesystem Sandbox Is On";
+    c.textProperties.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    c.secondaryText = @"Widgets cannot load while Nyxian’s “Filesystem Sandbox” is on. Turn it off in Nyxian’s recovery settings, then respring.";
+    c.secondaryTextProperties.color = UIColor.secondaryLabelColor;
+    c.secondaryTextProperties.numberOfLines = 0;
+    c.image = [UIImage systemImageNamed:@"exclamationmark.triangle.fill"];
+    c.imageProperties.tintColor = UIColor.systemOrangeColor;
+    c.textToSecondaryTextVerticalPadding = 4;
+    cell.contentConfiguration = c;
+    return cell;
 }
 
 - (void)reloadApps {
@@ -454,20 +492,31 @@ static void WGAlert(UIViewController *on, NSString *title, NSString *message) {
     [searchBar resignFirstResponder];
 }
 
+- (BOOL)isWarningSection:(NSInteger)section {
+    return [self showsSandboxWarning] && section == 0;
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return MAX(1, (NSInteger)_shown.count);
+    return [self isWarningSection:section] ? 1 : MAX(1, (NSInteger)_shown.count);
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if ([self isWarningSection:section]) return nil;
     return WGHomeDrawingStopped() ? @"Widgets are not drawn during this launch: SpringBoard ended repeatedly just before." : nil;
 }
 
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return [self isWarningSection:indexPath.section] ? UITableViewAutomaticDimension : tableView.rowHeight;
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if ([self isWarningSection:indexPath.section]) return [self sandboxWarningCell];
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     cell.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
     UIListContentConfiguration *c = [UIListContentConfiguration cellConfiguration];
     if (!_shown.count) {
-        c.text = _search.text.length ? @"No Results" : [@"No apps with widgets\n\n" stringByAppendingString:WGFilesystemSandboxHint];
+        c.text = _search.text.length ? @"No Results"
+                 : [self showsSandboxWarning] ? @"No apps with widgets" : [@"No apps with widgets\n\n" stringByAppendingString:WGFilesystemSandboxHint];
         c.textProperties.color = UIColor.secondaryLabelColor;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else {
@@ -485,7 +534,7 @@ static void WGAlert(UIViewController *on, NSString *title, NSString *message) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (!_shown.count) return;
+    if ([self isWarningSection:indexPath.section] || !_shown.count) return;
     WGExtension *e = _shown[indexPath.row];
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];

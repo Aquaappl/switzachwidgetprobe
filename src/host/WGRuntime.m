@@ -1753,6 +1753,13 @@ static NSArray *WGAppIntentParameters(NSString *kind, NSString *config, NSString
         WGLog(@"Edit Widget: IntentParameter.wrappedValue not found");
         return nil;
     }
+    // Reading them calls into AppIntents directly: a crash doing so turns it off for this app.
+    NSString *marker = [@"appintent-params-" stringByAppendingString:gExt.extensionID];
+    if (WGMarkerTripped(marker)) {
+        *error = @"This widget's settings could not be read (it crashed before). Reset Widget Safety Guards in the settings to try again.";
+        return nil;
+    }
+    WGMarkerBegin(marker);
     NSDictionary *root = nil;
     NSDictionary *action = WGActionMetadata(t, &root);
     NSMutableDictionary *metaParams = [NSMutableDictionary dictionary];
@@ -1796,6 +1803,7 @@ static NSArray *WGAppIntentParameters(NSString *kind, NSString *config, NSString
         WGLog(@"Edit Widget: .%@ %@ (%@) = %@; metadata %@", names[i], WGTypeName(p.valueType), kindOf, d[@"value"] ?: @"?",
               meta ? [[meta.allKeys sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","] : @"none");
     }
+    WGMarkerEnd(marker);
     if (!out.count) *error = @"This widget has no settings.";
     return out.count ? out : nil;
 }

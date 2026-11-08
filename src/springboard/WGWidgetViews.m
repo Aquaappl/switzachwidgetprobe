@@ -19,6 +19,7 @@
 
 NSString *const WGFilesystemSandboxMessage = @"Widgets cannot load: turn off “Filesystem Sandbox” in Nyxian’s recovery settings";
 NSString *const WGFilesystemSandboxHint = @"If apps with widgets are installed, turn off “Filesystem Sandbox” in Nyxian’s recovery settings.";
+NSNotificationName const WGFilesystemSandboxChangedNotification = @"WGFilesystemSandboxChanged";
 
 static const CGFloat kWGDefaultCornerRadius = 22;
 static BOOL gSettingContainerBackground; // our own call of -[SBHWidgetContainerView setBackgroundView:]
